@@ -109,19 +109,21 @@ build plan for the exact commands used):
   `python3`, not on the host. The release workflow's strcmp guard runs on the
   GitHub-hosted runner, which has PHP, via `scripts/version-sorts-after.php`.
 
-## Dev-environment fact: this container shares the live host
+## Dev-environment fact: this container runs ON the live host
 
-Verified 2026-09-13: `docker images` in this dev container lists the live
-production containers (Immich, Radarr, PlexCache-D, etc.), and a process
-started in this container is visible via `ps` over `ssh
-root@192.168.0.10` under its own real pid. This container is not an isolated
-build sandbox — it shares the host's docker daemon and process namespace with
-the actual Unraid box `scripts/*-on-host.sh` ssh into. Two consequences:
+Verified 2026-09-13: this dev container (`claude-code`) is itself a Docker
+container on the production Unraid box that `scripts/*-on-host.sh` ssh into,
+with the host's docker socket bind-mounted in. So `docker images`/`docker ps`
+here show the live production containers, and a process started in this
+container is visible in `ps` over `ssh root@192.168.0.10` under its real pid —
+because the host sees every container's processes, not because namespaces are
+shared (the container still has its own PID namespace). Two consequences:
 
-- Never `docker run` anything here to get a tool (e.g. a throwaway PHP image)
-  — it starts a real container on the production NAS. Missing local tooling
-  (this container has no PHP) has to be worked around some other way, or left
-  to CI, which runs on an isolated GitHub-hosted runner.
+- `docker run` here starts a real container on the production NAS. Don't reach
+  for a throwaway image (e.g. a PHP image) to get missing local tooling — this
+  container has no PHP and no `xz`; leave PHP tests and the `.txz` build to CI,
+  which runs on an isolated GitHub-hosted runner. (A global PreToolUse hook
+  only auto-allows `docker rm`/`docker stop` on `smoketest-` prefixed names.)
 - Any `pgrep -f` (or similar) run against this host will match THIS agent
   session's own process if the pattern is a substring of the task prompt —
   the prompt is visible in `ps` output verbatim. `scripts/uninstall-on-host.sh`

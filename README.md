@@ -18,7 +18,7 @@ tiering logic is written.
 
 ## Relationship with PlexCache-D
 
-[PlexCache-D](https://forums.unraid.net/) proactively prefetches Plex's On
+[PlexCache-D](https://github.com/StudioNirin/PlexCache-D) proactively prefetches Plex's On
 Deck/watchlist items before playback starts, but it's blind to any client that
 isn't Plex — including a file-browser app connecting anonymously over SMB,
 which is a real, regular viewing path on the host this was built for. Dormouse
