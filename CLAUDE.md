@@ -61,14 +61,22 @@ Hard-won from SecretsMan and NetMan. Not optional, not footnotes.
   path in `scripts/*-on-host.sh` are the same pattern the public secretsman repo
   already ships, and are acceptable.)
 
-### Future-phase constraint — never stat pool paths on a timer
+### Never stat pool paths on a timer (Phase 2 onward, one deliberate exception)
 
-From Phase 2 onward, the daemon must not `stat()` or otherwise poll paths on
-`/mnt/snowflake` on a timer — that spins the disks the plugin exists to keep
-asleep. State comes from the event stream (`inotifywait`, `smbstatus -j`) and
-from the cache side only. This is easy to violate by accident in a
-reconciliation or housekeeping loop; call it out explicitly in review whenever
-that code is touched.
+The daemon must not `stat()` or otherwise poll paths on `/mnt/snowflake` on a
+timer — that spins the disks the plugin exists to keep asleep. State comes
+from the event stream (`inotifywait`, `smbstatus -j`) and from the cache side
+only. This is easy to violate by accident in a reconciliation or housekeeping
+loop; call it out explicitly in review whenever that code is touched.
+
+The **one** deliberate exception, shipped in Phase 2: `dormouse_build_watch_dirs()`
+in `plugin/scripts/lib.php` walks the watched shares down to `watch_depth` to
+build the `inotifywait --fromfile` list, at startup and every
+`watch_refresh_minutes`. It is bounded (never recursive past `watch_depth`)
+and every call logs `watch refresh: N dirs found in X.XXs` — watch that
+duration during the evidence week; if a *refresh* (not the cold startup walk)
+takes more than a second or two, this exception is spinning the pool on a
+15-minute timer and needs revisiting before Phase 3.
 
 ## What this is
 
@@ -139,18 +147,71 @@ shared (the container still has its own PID namespace). Two consequences:
 dormouse.plg                    .plg — entities, CHANGES, install/remove FILE blocks
 plugin/                         installed tree (unpacked to /usr/local/emhttp/plugins/dormouse/)
   README.md                     stock one-paragraph description (Plugins tab)
-  Dormouse.page                 settings page, registered under Settings > Utilities
+  Dormouse.page                 settings page — live activity view (Phase 2), polled via $.post
   scripts/rc.dormouse           start|stop|restart|status, supervises dormoused
-  scripts/dormoused             PHP no-op daemon (Phase 1)
+  scripts/dormoused              PHP daemon — Phase 2: smbstatus poller + inotifywait child
+  scripts/lib.php                config/db/smb/inotify helpers, shared by dormoused, the api
+                                  endpoint and tests/run.php
+  scripts/dormouse-api.php        read-only JSON status endpoint for Dormouse.page
 scripts/
   build-plugin.sh <version>     builds dist/dormouse-<version>.txz
   install-on-host.sh            installs/upgrades on the live host over ssh, verifies
   uninstall-on-host.sh          removes on the live host over ssh, asserts clean revert
   version-sorts-after.php       strcmp version guard, shared by release.yml and tests
 tests/run.php                   hand-rolled PHP assert runner
+tests/fixtures/smbstatus.json   synthetic smbstatus -j JSON (RFC 5737 IPs, fake titles)
 .github/workflows/ci.yml        lint + test on push/PR
 .github/workflows/release.yml   version guard, build, tag, GitHub Release on push to main
 ```
+
+## The `activity` table (Phase 2)
+
+SQLite at `db_path` (default `/mnt/cache/appdata/dormouse/manifest.db`, never
+on flash), created idempotently by `dormouse_open_db()`, WAL mode:
+
+```sql
+CREATE TABLE activity (
+  ts INTEGER NOT NULL, rel_path TEXT NOT NULL, share TEXT NOT NULL,
+  client_ip TEXT NOT NULL, source TEXT NOT NULL, event TEXT NOT NULL,
+  count INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE stats (key TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0);
+```
+
+One deviation from the PLAN.md §4 `activity` shape: a `count` column, needed
+because inotify `ACCESS` events are coalesced (at most one row per file per
+60s, with a count) rather than one row per event — a 20 GB read would
+otherwise be ~20,000 rows. `stats` holds `watch_count`,
+`watch_last_refresh_ts`, and `inotify_overflow_count`.
+
+SMB rows are **transitions**, not one row per open handle per poll: `open` on
+first sight of a handle, `dirwatch` instead of `open` for a share-root handle
+(Plex's long-lived directory watch — Samba reports its filename as `.` or
+possibly `""`; both are treated as dirwatch, verified against a live capture
+for the `""` case only, see G5), `close` when a previously-seen handle
+disappears. Client IP is resolved via the matching `tcon.machine`, never via
+`sessions[].username` (guests are all `nobody`).
+
+`inotify_overflow_count` increments whenever an inotifywait `%e` field
+contains the substring `OVERFLOW`; this is unverified against a real
+`IN_Q_OVERFLOW` until gate G4 actually produces one (unlikely — the daemon's
+drain loop should comfortably outrun a spinning raidz1's read rate).
+
+The settings page (`Dormouse.page`) never touches the db directly — it polls
+`dormouse-api.php` (urlencoded `$.post` with `csrf_token`, per the WebGUI
+rules above) every 15s, which opens the db `SQLITE3_OPEN_READONLY` and
+returns JSON built by `dormouse_build_status()`.
+
+## Movies is out of scope
+
+Never watched, never listed as a watched share, never acted on — PlexCache-D
+already covers it and a single-file movie directory gets nothing from
+Dormouse's sequential-sibling model. The five `shareUseCache=yes` shares
+(Kieren, Teegan, Downloads, Filing Cabinet, Photos) have `snowflake` as their
+*secondary* pool, so the stock Unraid mover already moves cache→snowflake for
+them on its own schedule — a Phase 4+ interlock consideration (Dormouse
+promoting a file the stock mover is about to demote back), nothing to
+implement yet.
 
 ## Test command
 
@@ -175,15 +236,18 @@ php tests/run.php
 Each phase is one `/feature` invocation, ends green in CI with a cut release,
 and is verified on the live host before the next phase starts.
 
-- **Phase 1 — scaffold and release pipeline. (this release, 0.1.0.)** Repo,
+- **Phase 1 — scaffold and release pipeline. (0.1.0, shipped.)** Repo,
   `.plg` skeleton, packaging script, release workflow with the strcmp version
   guard, empty settings page, `rc.dormouse` starting/stopping a no-op daemon.
   Installed and uninstalled on the live host, uninstall verified to revert
   cleanly, before any tiering logic exists.
-- **Phase 2 — observation mode (no moves).** Both event sources unified into an
-  `activity` table; settings page shows a live activity view; moves impossible,
-  not merely disabled. Run for a week to gather evidence on which shares beyond
-  Content would benefit.
+- **Phase 2 — observation mode (no moves). (this release, 0.2.0, current.)**
+  Both event sources unified into an `activity` table; settings page shows a
+  live activity view; moves impossible, not merely disabled (enforced by a
+  grep test over `plugin/`). Installed on the live host over 0.1.0, verified
+  the cfg upgrade and the new daemon; the evidence week starts at install and
+  runs for a week from there to decide which shares beyond Content benefit.
+  See "Live-host verification gates — Phase 2" below for results.
 - **Phase 3 — manifest, rules engine, dry-run promote.** SQLite schema, startup
   reconciliation, both rule classes, fill guard, full decision logging. Still
   moves nothing.
@@ -193,3 +257,21 @@ and is verified on the live host before the next phase starts.
 - **Phase 6 — settings GUI and log viewer.**
 - **Phase 7 — interlocks and coexistence.** PlexCache-D exclusion export,
   mover/parity pause, a second rule class enabled based on Phase 2 evidence.
+
+## Live-host verification gates — Phase 2
+
+Gate results — pending. Each of G1–G5 below (PLAN.md §8 Phase 2), plus the
+end-to-end inotify check, must be recorded here with method, date, observed
+result, and cleanup confirmation before Phase 3 starts.
+
+- G1 — shfs union probe (Content, `only` on snowflake, cache copy visible
+  under `/mnt/user`):
+- G2 — hold-directory visibility (`/mnt/snowflake/.dormouse` auto-promoted to
+  a share or not):
+- G3 — `inotifywait -m -r` new-directory behaviour under a probe dir:
+- G4 — `IN_Q_OVERFLOW` under a real ≥10GB read (overflow counter, coalesced
+  row count, daemon survival):
+- G5 — Plex directory-watch handles recorded as `dirwatch`, not `open`:
+- End-to-end: an ssh `cat` of a small Content file appears as an `inotify`
+  activity row within a minute, checked via both `/mnt/snowflake/...` and
+  `/mnt/user/...` paths.

@@ -10,19 +10,39 @@ zero-padded, because Unraid's plugin manager compares versions with a plain
 
 ## [Unreleased]
 
-### Plan — Phase 2, observation mode (2026-09-13)
+## [0.2.0] - 2026-09-13
 
-Both event sources (`smbstatus -j` poll, `inotifywait -m` on pool-side watch
-dirs) unified into an `activity` table in SQLite under
-`/mnt/cache/appdata/dormouse/`. Settings page gets a live, read-only activity
-view. No scoring, no `promoted` table, no move code anywhere in the shipped
-tree — enforced by a grep test. Six watched shares from day one (Content,
-Kieren, Teegan, Downloads, Filing Cabinet, Photos); Movies out of scope.
-Files: `plugin/scripts/lib.php` (config/db/smb/inotify helpers),
-`plugin/scripts/dormoused` (rewritten to run both sources), a small
-`plugin/scripts/dormouse-api.php` read endpoint, `Dormouse.page` polling it,
-`dormouse.plg` cfg-seeding upgraded to detect the Phase 1 placeholder cfg and
-replace it with real defaults. Version 0.2.0.
+### Added
+
+- Observation mode: `plugin/scripts/lib.php` unifies two event sources into
+  an `activity` table in SQLite under `/mnt/cache/appdata/dormouse/` (never
+  on flash) — a `smbstatus -j` poller (open/close/dirwatch transitions per
+  handle, client IP resolved via tcon, never username) and a long-running
+  `inotifywait -m` child over pool-side watch dirs bounded to `watch_depth`,
+  with explicit `IN_Q_OVERFLOW` handling and per-file access coalescing.
+- `dormouse.cfg` (flash, ini-style) with real defaults for the six watched
+  shares, pool/cache roots, poll/refresh intervals, and `db_path`; the
+  install block upgrades the Phase 1 placeholder cfg in place without ever
+  touching a cfg that already has real keys.
+- `plugin/scripts/dormouse-api.php` — read-only status endpoint, and a live
+  activity view on the settings page (daemon status, watch count, overflow
+  counter, per-share 24h counts, last 50 rows), polled via urlencoded
+  `$.post` per the WebGUI rules in `CLAUDE.md`.
+- Moves remain structurally impossible, not merely disabled: a test greps
+  the whole `plugin/` tree for move/rename/delete call shapes and fails the
+  suite if any appear.
+- `scripts/uninstall-on-host.sh` now also asserts the daemon's inotifywait
+  child is gone; the manifest db under appdata is deliberately preserved.
+
+### Changed
+
+- `scripts/install-on-host.sh` verifies the upgraded cfg has real keys and
+  that the inotifywait child is running (with a retry, since the daemon's
+  own startup watch-list walk can take tens of seconds on a cold pool).
+
+This release still moves nothing. It exists to gather a week of real
+activity evidence (which shares beyond Content actually get read) before any
+scoring or promote logic is written in Phase 3.
 
 ## [0.1.0] - 2026-09-13
 

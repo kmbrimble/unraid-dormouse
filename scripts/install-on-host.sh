@@ -104,8 +104,27 @@ check "pid file present" \
     "[[ -f /var/run/dormouse.pid ]]"
 check "dormouse.cfg was upgraded to real defaults (not the Phase 1 placeholder)" \
     "grep -q '^watched_shares=' /boot/config/plugins/dormouse/dormouse.cfg"
-check "inotifywait child running against the flash-free watch list" \
-    "pgrep -f 'inotifywait.*--fromfile /var/run/[d]ormouse/watch.list'"
+
+# The daemon walks all six watched shares to watch_depth before it spawns
+# inotifywait — on a cold pool that's a real spin-up plus a seek per
+# directory, plausibly 30-60s, so this can't be a single immediate check.
+# -fc (not bare -f) so this also catches an upgrade leaving two children
+# running, not just zero vs one.
+echo "waiting for the inotifywait child to start (daemon walks the pool first)..."
+INOTIFY_OK=0
+for i in $(seq 1 60); do
+    COUNT="$("${SSH[@]}" "pgrep -fc 'inotifywait.*--fromfile /var/run/[d]ormouse/watch.list'" || echo 0)"
+    if [[ "$COUNT" == "1" ]]; then
+        echo "  OK: inotifywait child running against the flash-free watch list (after ~$((i * 2))s)"
+        INOTIFY_OK=1
+        break
+    fi
+    sleep 2
+done
+if [[ "$INOTIFY_OK" -ne 1 ]]; then
+    echo "  FAIL: inotifywait child not running with exactly one instance after 120s (last count: $COUNT)"
+    FAIL=1
+fi
 
 if [[ "$FAIL" -ne 0 ]]; then
     echo "install-on-host: one or more checks FAILED" >&2

@@ -184,6 +184,15 @@ while ($running) {
         $lastSmbPoll = $now;
     }
 
+    // Checked again here, not just at the top of the loop: a SIGTERM that
+    // lands mid-iteration must not walk the pool (possibly tens of seconds
+    // on a cold start) before honouring shutdown — rc.dormouse only waits
+    // 10s before declaring the daemon stopped and letting the install block
+    // start a new one.
+    if (!$running) {
+        break;
+    }
+
     if ($now - $lastWatchRefresh >= $config['watch_refresh_minutes'] * 60) {
         $start = microtime(true);
         $newWatchDirs = dormouse_build_watch_dirs($config['pool_root'], $config['watched_shares'], $config['watch_depth']);
