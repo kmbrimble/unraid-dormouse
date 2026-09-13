@@ -45,7 +45,11 @@ function dormouse_start_inotify_child(array $watchDirs, string $runDir, string $
     }
 
     $cmd = [$binary, '-m', '-e', 'open,access,close_nowrite', '--format', '%w|%f|%e', '--fromfile', $listFile];
-    $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+    // stderr goes straight to the log file, never a pipe we'd have to drain
+    // ourselves — inotifywait's own "Setting up watches"/"Couldn't watch"
+    // lines otherwise fill the pipe buffer and block the child from ever
+    // delivering another event.
+    $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['file', $logFile, 'a']];
     $proc = proc_open($cmd, $descriptors, $pipes);
     if ($proc === false) {
         dormouse_log($logFile, 'failed to start inotifywait');
@@ -53,9 +57,8 @@ function dormouse_start_inotify_child(array $watchDirs, string $runDir, string $
     }
     fclose($pipes[0]);
     stream_set_blocking($pipes[1], false);
-    stream_set_blocking($pipes[2], false);
     dormouse_log($logFile, sprintf('inotifywait started watching %d dirs', count($watchDirs)));
-    return ['proc' => $proc, 'stdout' => $pipes[1], 'stderr' => $pipes[2], 'buffer' => ''];
+    return ['proc' => $proc, 'stdout' => $pipes[1], 'buffer' => ''];
 }
 
 function dormouse_stop_inotify_child(?array &$child, string $logFile): void
@@ -64,20 +67,25 @@ function dormouse_stop_inotify_child(?array &$child, string $logFile): void
         return;
     }
     @fclose($child['stdout']);
-    @fclose($child['stderr']);
     proc_terminate($child['proc']);
     proc_close($child['proc']);
     dormouse_log($logFile, 'inotifywait stopped');
     $child = null;
 }
 
-/** Drains whatever is currently available on the child's stdout, non-blocking. */
-function dormouse_drain_inotify(array &$child): array
+/**
+ * Drains whatever is currently available on the child's stdout, non-blocking.
+ * Returns null (instead of an empty array) if the child has exited — an EOF
+ * on a live process, distinct from "nothing to read right now" — so the
+ * caller can reap it and force an immediate watch-list rebuild + restart
+ * rather than spinning on a dead pipe.
+ */
+function dormouse_drain_inotify(array &$child): ?array
 {
     $lines = [];
     $chunk = fread($child['stdout'], 65536);
     if ($chunk === false || $chunk === '') {
-        return $lines;
+        return feof($child['stdout']) ? null : $lines;
     }
     $child['buffer'] .= $chunk;
     while (($pos = strpos($child['buffer'], "\n")) !== false) {
@@ -121,7 +129,14 @@ while ($running) {
             // interrupted by our own SIGTERM handler — loop will re-check $running
             continue;
         }
-        foreach (dormouse_drain_inotify($inotifyChild) as $line) {
+        $lines = dormouse_drain_inotify($inotifyChild);
+        if ($lines === null) {
+            dormouse_log($logFile, 'inotifywait child exited unexpectedly — forcing watch rebuild + restart');
+            dormouse_stop_inotify_child($inotifyChild, $logFile);
+            $lastWatchRefresh = 0;
+            continue;
+        }
+        foreach ($lines as $line) {
             if (dormouse_inotify_line_is_overflow($line)) {
                 dormouse_stat_incr($db, 'inotify_overflow_count');
                 dormouse_log($logFile, 'IN_Q_OVERFLOW: ' . $line);
@@ -175,7 +190,10 @@ while ($running) {
         $duration = microtime(true) - $start;
         dormouse_log($logFile, sprintf('watch refresh: %d dirs found in %.2fs', count($newWatchDirs), $duration));
         dormouse_set_watch_stats($db, count($newWatchDirs));
-        if ($newWatchDirs !== $watchDirs) {
+        // ponytail: also restart whenever the child is dead (crash, or the
+        // forced rebuild above), even if the dir list is unchanged — no
+        // backoff on a persistently-failing child, just a log line per cycle.
+        if ($inotifyChild === null || $newWatchDirs !== $watchDirs) {
             dormouse_stop_inotify_child($inotifyChild, $logFile);
             $watchDirs = $newWatchDirs;
             $inotifyChild = dormouse_start_inotify_child($watchDirs, $runDir, $logFile);

@@ -19,31 +19,40 @@ if (file_exists($pidFile)) {
 <div id="dormouse-status">Loading activity…</div>
 
 <script>
+// rel_path and client_ip come from filenames/IPs observed on the network —
+// never trust them into innerHTML unescaped (a filename could contain
+// "<img onerror=...>"). Every interpolated field below must go through esc().
+function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+}
+
 function dormouseRender(data) {
     var el = document.getElementById('dormouse-status');
     if (data.error) {
-        el.innerHTML = '<p>' + data.error + '</p>';
+        el.innerHTML = '<p>' + esc(data.error) + '</p>';
         return;
     }
     var html = '';
     html += '<p>Daemon: <b>' + (data.daemon_running ? 'running' : 'stopped') + '</b></p>';
-    html += '<p>Watched shares: ' + data.watched_shares.join(', ') + '</p>';
-    html += '<p>Watch dirs: ' + data.watch_count + ' (last refresh: ' +
-        (data.watch_last_refresh_ts ? new Date(data.watch_last_refresh_ts * 1000).toLocaleString() : 'never') + ')</p>';
-    html += '<p>Inotify overflow count: ' + data.overflow_count + '</p>';
+    html += '<p>Watched shares: ' + esc(data.watched_shares.join(', ')) + '</p>';
+    html += '<p>Watch dirs: ' + esc(data.watch_count) + ' (last refresh: ' +
+        (data.watch_last_refresh_ts ? esc(new Date(data.watch_last_refresh_ts * 1000).toLocaleString()) : 'never') + ')</p>';
+    html += '<p>Inotify overflow count: ' + esc(data.overflow_count) + '</p>';
 
     html += '<h3>Last 24h by share</h3><table border="1" cellpadding="4"><tr><th>Share</th><th>SMB opens</th><th>Inotify accesses</th></tr>';
     for (var share in data.per_share_24h) {
         var row = data.per_share_24h[share];
-        html += '<tr><td>' + share + '</td><td>' + row.smb_open + '</td><td>' + row.inotify_access + '</td></tr>';
+        html += '<tr><td>' + esc(share) + '</td><td>' + esc(row.smb_open) + '</td><td>' + esc(row.inotify_access) + '</td></tr>';
     }
     html += '</table>';
 
     html += '<h3>Last 50 activity rows</h3><table border="1" cellpadding="4"><tr><th>Time</th><th>Share</th><th>Path</th><th>Client IP</th><th>Source</th><th>Event</th><th>Count</th></tr>';
     data.recent.forEach(function (row) {
-        html += '<tr><td>' + new Date(row.ts * 1000).toLocaleString() + '</td><td>' + row.share + '</td><td>' +
-            row.rel_path + '</td><td>' + row.client_ip + '</td><td>' + row.source + '</td><td>' + row.event +
-            '</td><td>' + row.count + '</td></tr>';
+        html += '<tr><td>' + esc(new Date(row.ts * 1000).toLocaleString()) + '</td><td>' + esc(row.share) + '</td><td>' +
+            esc(row.rel_path) + '</td><td>' + esc(row.client_ip) + '</td><td>' + esc(row.source) + '</td><td>' + esc(row.event) +
+            '</td><td>' + esc(row.count) + '</td></tr>';
     });
     html += '</table>';
 

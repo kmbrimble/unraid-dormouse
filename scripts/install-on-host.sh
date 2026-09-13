@@ -95,13 +95,17 @@ check "flash .plg reports version $VERSION" \
 check "registered in /var/log/plugins/dormouse.plg" \
     "[[ -f /var/log/plugins/dormouse.plg ]]"
 check "installed tree complete" \
-    "[[ -f /usr/local/emhttp/plugins/dormouse/README.md && -f /usr/local/emhttp/plugins/dormouse/Dormouse.page && -f /usr/local/emhttp/plugins/dormouse/scripts/rc.dormouse && -f /usr/local/emhttp/plugins/dormouse/scripts/dormoused ]]"
+    "[[ -f /usr/local/emhttp/plugins/dormouse/README.md && -f /usr/local/emhttp/plugins/dormouse/Dormouse.page && -f /usr/local/emhttp/plugins/dormouse/scripts/rc.dormouse && -f /usr/local/emhttp/plugins/dormouse/scripts/dormoused && -f /usr/local/emhttp/plugins/dormouse/scripts/lib.php && -f /usr/local/emhttp/plugins/dormouse/scripts/dormouse-api.php ]]"
 check "packaged README has no heading" \
     "! grep -q '^#' /usr/local/emhttp/plugins/dormouse/README.md"
 check "rc.dormouse reports running" \
     "bash /usr/local/emhttp/plugins/dormouse/scripts/rc.dormouse status"
 check "pid file present" \
     "[[ -f /var/run/dormouse.pid ]]"
+check "dormouse.cfg was upgraded to real defaults (not the Phase 1 placeholder)" \
+    "grep -q '^watched_shares=' /boot/config/plugins/dormouse/dormouse.cfg"
+check "inotifywait child running against the flash-free watch list" \
+    "pgrep -f 'inotifywait.*--fromfile /var/run/[d]ormouse/watch.list'"
 
 if [[ "$FAIL" -ne 0 ]]; then
     echo "install-on-host: one or more checks FAILED" >&2

@@ -44,12 +44,6 @@ function dormouse_parse_config_string(string $contents): array
     return $out;
 }
 
-/** True if the cfg file has no real key=value lines — the Phase 1 placeholder shape. */
-function dormouse_config_is_placeholder(string $contents): bool
-{
-    return count(dormouse_parse_config_string($contents)) === 0;
-}
-
 function dormouse_load_config(string $path): array
 {
     $config = dormouse_default_config();
@@ -70,15 +64,6 @@ function dormouse_load_config(string $path): array
         }
     }
     return $config;
-}
-
-function dormouse_config_to_string(array $config): string
-{
-    $lines = ['# Dormouse configuration'];
-    foreach ($config as $key => $value) {
-        $lines[] = $key . '=' . (is_array($value) ? implode(',', $value) : (string) $value);
-    }
-    return implode("\n", $lines) . "\n";
 }
 
 // --- Manifest db -------------------------------------------------------------
@@ -265,7 +250,13 @@ function dormouse_parse_smbstatus_json(string $json, array $watchedShares): arra
             continue;
         }
         $relPath = (string) ($file['filename'] ?? '');
-        $isDirwatch = $relPath === '';
+        // Samba reports a share-root directory handle's filename as "." (some
+        // versions/paths as ""); treat both as the root, never guessed from
+        // one live sample alone.
+        $isDirwatch = $relPath === '' || $relPath === '.';
+        if ($isDirwatch) {
+            $relPath = '';
+        }
         foreach ($file['opens'] ?? [] as $open) {
             $uid = $open['server_id']['unique_id'] ?? null;
             $clientIp = $uid !== null ? ($machineMap[$uid] ?? '') : '';
@@ -364,6 +355,10 @@ function dormouse_collect_dirs(string $dir, int $depthRemaining, array &$out): v
  * Parses one line of `inotifywait -m --format '%w|%f|%e'` output.
  * Returns null for lines that don't parse, and for IN_Q_OVERFLOW is
  * reported separately via dormouse_inotify_line_is_overflow().
+ *
+ * ponytail: a literal "|" inside a filename would corrupt this split (none
+ * of the watched libraries use one); switch to a NUL-separated --format if
+ * that ever stops holding.
  *
  * @return array{dir:string, file:string, events:string[]}|null
  */

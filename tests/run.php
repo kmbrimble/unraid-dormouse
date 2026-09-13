@@ -233,9 +233,18 @@ t('dormouse_load_config returns full defaults for a missing file', function () {
     assert_eq(dormouse_default_config(), $cfg);
 });
 
-t('the 0.1.0 placeholder cfg (comment-only) is detected as needing real defaults', function () {
-    assert_true(dormouse_config_is_placeholder("# Dormouse configuration - Phase 1 scaffold, no settings yet.\n"));
-    assert_true(!dormouse_config_is_placeholder("watched_shares=Content\n"));
+t('the install block\'s own placeholder-detection grep rejects the 0.1.0 comment-only cfg and accepts a real one', function () {
+    $placeholder = tempnam(sys_get_temp_dir(), 'dormouse-placeholder-');
+    file_put_contents($placeholder, "# Dormouse configuration - Phase 1 scaffold, no settings yet.\n");
+    exec('grep -qE ' . escapeshellarg('^[A-Za-z_]+=') . ' ' . escapeshellarg($placeholder), $o1, $rc1);
+    assert_eq(1, $rc1, 'placeholder cfg must NOT match the key=value grep');
+    unlink($placeholder);
+
+    $real = tempnam(sys_get_temp_dir(), 'dormouse-real-');
+    file_put_contents($real, "watched_shares=Content\n");
+    exec('grep -qE ' . escapeshellarg('^[A-Za-z_]+=') . ' ' . escapeshellarg($real), $o2, $rc2);
+    assert_eq(0, $rc2, 'a real cfg with key=value lines must match the grep');
+    unlink($real);
 });
 
 t('dormouse.plg only rewrites the cfg when no real key=value line is present', function () use ($plgRaw) {

@@ -48,7 +48,7 @@
   "open_files": {
     "/mnt/user/Content": {
       "service_path": "/mnt/user/Content",
-      "filename": "",
+      "filename": ".",
       "fileid": {"devid": 1, "inode": 1, "extid": 0},
       "opens": {
         "111/1": {"server_id": {"pid": "111", "task_id": "0", "vnn": "4294967295", "unique_id": "9000000001"}}
