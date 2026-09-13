@@ -24,5 +24,15 @@ if (!is_file($config['db_path'])) {
     return;
 }
 
-$db = new SQLite3($config['db_path'], SQLITE3_OPEN_READONLY);
-echo json_encode(dormouse_build_status($db, $config, $pidFile));
+try {
+    $db = new SQLite3($config['db_path'], SQLITE3_OPEN_READONLY);
+    echo json_encode(dormouse_build_status($db, $config, $pidFile));
+} catch (\Throwable $e) {
+    // A mid-write or momentarily-locked db must not surface as a 500 with a
+    // stack trace — the page polls this every 15s and should just show the
+    // error and retry next tick.
+    echo json_encode([
+        'daemon_running' => dormouse_daemon_running($pidFile),
+        'error' => 'manifest database unavailable',
+    ]);
+}

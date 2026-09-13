@@ -385,6 +385,18 @@ t('dormouse_inotify_dir_to_share maps a pool path to share + sub-path, rejects u
     assert_true(dormouse_inotify_dir_to_share('/mnt/cache/Content', '/mnt/snowflake', $shares) === null, 'path outside pool_root must be rejected');
 });
 
+t('dormouse_inotify_dir_to_share strips the trailing slash inotifywait\'s %w always includes', function () {
+    // confirmed live against the pool: `inotifywait ... --format '%w|%f|%e'`
+    // prints dir with a trailing slash even for a nested subdirectory watch.
+    $shares = ['Content'];
+    assert_eq(
+        ['Content', 'Example Show/Season 1'],
+        dormouse_inotify_dir_to_share('/mnt/snowflake/Content/Example Show/Season 1/', '/mnt/snowflake', $shares),
+        'a trailing slash on a nested dir must not produce a doubled slash in the sub-path'
+    );
+    assert_eq(['Content', ''], dormouse_inotify_dir_to_share('/mnt/snowflake/Content/', '/mnt/snowflake', $shares));
+});
+
 t('watch-list generation is bounded by depth against a real temp tree', function () {
     $root = sys_get_temp_dir() . '/dormouse-watch-' . uniqid();
     mkdir("$root/Content/Show/Season 1/deep", 0755, true);
@@ -441,6 +453,25 @@ t('shutdown flushes buffered access counts even if the window has not elapsed', 
     unlink($tmp);
     @unlink($tmp . '-wal');
     @unlink($tmp . '-shm');
+});
+
+// --- Phase 2: web endpoint ------------------------------------------------------
+
+t('dormouse-api.php returns an error JSON instead of a fatal when the db is corrupt', function () use ($repoRoot) {
+    $tmpDir = sys_get_temp_dir() . '/dormouse-api-' . uniqid();
+    mkdir($tmpDir);
+    $dbPath = "$tmpDir/manifest.db";
+    file_put_contents($dbPath, 'not a sqlite file');
+    $cfgFile = "$tmpDir/dormouse.cfg";
+    file_put_contents($cfgFile, "db_path=$dbPath\n");
+
+    $env = sprintf('DORMOUSE_CFG=%s DORMOUSE_PIDFILE=%s', escapeshellarg($cfgFile), escapeshellarg("$tmpDir/dormouse.pid"));
+    exec("$env php " . escapeshellarg($repoRoot . '/plugin/scripts/dormouse-api.php'), $out, $exit);
+    assert_eq(0, $exit, 'endpoint must exit 0 even when the db is corrupt');
+    $json = json_decode(implode("\n", $out), true);
+    assert_true(is_array($json) && isset($json['error']), 'expected an error JSON body, got: ' . implode("\n", $out));
+
+    exec('rm -rf ' . escapeshellarg($tmpDir));
 });
 
 // --- Phase 2: moves must be structurally impossible -------------------------------

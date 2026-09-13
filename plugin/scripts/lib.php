@@ -420,6 +420,11 @@ function dormouse_flush_all_access(SQLite3 $db, array &$buffer, int $now): void
 function dormouse_inotify_dir_to_share(string $dir, string $poolRoot, array $watchedShares): ?array
 {
     $poolRoot = rtrim($poolRoot, '/');
+    // inotifywait's %w always ends in a trailing slash for a directory watch
+    // (confirmed live: `%w|%f|%e` against the pool prints
+    // ".../.dormouse-probe-fmt/|a b.txt|OPEN") — strip it before splitting,
+    // or every event inside a subdirectory gets a doubled slash in rel_path.
+    $dir = rtrim($dir, '/');
     if (!str_starts_with($dir, $poolRoot . '/')) {
         return null;
     }
