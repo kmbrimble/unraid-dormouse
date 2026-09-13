@@ -10,6 +10,20 @@ zero-padded, because Unraid's plugin manager compares versions with a plain
 
 ## [Unreleased]
 
+### Plan — Phase 2, observation mode (2026-09-13)
+
+Both event sources (`smbstatus -j` poll, `inotifywait -m` on pool-side watch
+dirs) unified into an `activity` table in SQLite under
+`/mnt/cache/appdata/dormouse/`. Settings page gets a live, read-only activity
+view. No scoring, no `promoted` table, no move code anywhere in the shipped
+tree — enforced by a grep test. Six watched shares from day one (Content,
+Kieren, Teegan, Downloads, Filing Cabinet, Photos); Movies out of scope.
+Files: `plugin/scripts/lib.php` (config/db/smb/inotify helpers),
+`plugin/scripts/dormoused` (rewritten to run both sources), a small
+`plugin/scripts/dormouse-api.php` read endpoint, `Dormouse.page` polling it,
+`dormouse.plg` cfg-seeding upgraded to detect the Phase 1 placeholder cfg and
+replace it with real defaults. Version 0.2.0.
+
 ## [0.1.0] - 2026-09-13
 
 ### Added

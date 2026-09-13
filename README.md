@@ -11,10 +11,11 @@ watches filesystem and SMB activity directly, so it works for photos, Time
 Machine backups, or anything else regularly read off slow storage, not just
 Plex libraries.
 
-**Status: Phase 1 — scaffold only.** This release installs the plugin,
-registers an empty settings page, and runs a no-op supervised daemon. It moves
-nothing. It exists to prove the packaging and release pipeline before any
-tiering logic is written.
+**Status: Phase 2 — observation only.** The daemon polls `smbstatus -j` and
+watches pool-side directories with `inotifywait`, recording both into a
+SQLite activity log shown live on the settings page. It moves nothing —
+no move/copy/delete code exists anywhere in the shipped plugin tree, and a
+test enforces that.
 
 ## Relationship with PlexCache-D
 

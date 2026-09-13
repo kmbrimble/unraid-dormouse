@@ -40,6 +40,12 @@ check_absent "/var/log/plugins/dormouse.plg" "[[ -f /var/log/plugins/dormouse.pl
 # segment, to keep the invoking shell's literal argument from self-matching.
 check_absent "dormoused process" "pgrep -f '/usr/local/emhttp/plugins/dormouse/scripts/[d]ormoused'"
 
+# rc.dormouse's stop sends SIGTERM to dormoused, which terminates its own
+# inotifywait child as part of its shutdown handler before dormoused exits —
+# so this must be absent too, or Phase 2's watcher is left orphaned on the
+# pool after every uninstall (and every plain `rc.dormouse stop`).
+check_absent "inotifywait child process" "pgrep -f 'inotifywait.*--fromfile /var/run/[d]ormouse/watch.list'"
+
 check_absent "/var/run/dormouse.pid" "[[ -f /var/run/dormouse.pid ]]"
 check_absent "dormouse entry in /var/log/packages/" "ls /var/log/packages/ | grep -q '^dormouse-'"
 
@@ -48,4 +54,9 @@ if [[ "$FAIL" -ne 0 ]]; then
     exit 1
 fi
 
-echo "uninstall-on-host: clean revert confirmed"
+# Deliberately NOT checked here: /mnt/cache/appdata/dormouse/manifest.db.
+# The Phase 2 evidence week's whole point is a week of activity history to
+# survive a plugin remove/reinstall cycle during development — the plg's
+# remove block only ever touched the flash cfg dir and the installed tree,
+# never appdata, and that stays true here.
+echo "uninstall-on-host: clean revert confirmed (manifest db under appdata is deliberately preserved)"

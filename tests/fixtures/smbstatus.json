@@ -1,0 +1,74 @@
+{
+  "timestamp": "2026-01-01T12:00:00.000000+10:00",
+  "version": "4.22.10",
+  "smb_conf": "/etc/samba/smb.conf",
+  "sessions": {
+    "1000000001": {
+      "session_id": "1000000001",
+      "server_id": {"pid": "111", "task_id": "0", "vnn": "4294967295", "unique_id": "9000000001"},
+      "uid": 99,
+      "gid": 100,
+      "username": "nobody",
+      "remote_machine": "198.51.100.5",
+      "hostname": "ipv4:198.51.100.5:32768"
+    },
+    "1000000002": {
+      "session_id": "1000000002",
+      "server_id": {"pid": "222", "task_id": "0", "vnn": "4294967295", "unique_id": "9000000002"},
+      "uid": 99,
+      "gid": 100,
+      "username": "nobody",
+      "remote_machine": "192.0.2.10",
+      "hostname": "ipv4:192.0.2.10:32768"
+    }
+  },
+  "tcons": {
+    "2000000001": {
+      "service": "Content",
+      "server_id": {"pid": "111", "task_id": "0", "vnn": "4294967295", "unique_id": "9000000001"},
+      "tcon_id": "2000000001",
+      "session_id": "1000000001",
+      "machine": "198.51.100.5"
+    },
+    "2000000002": {
+      "service": "Content",
+      "server_id": {"pid": "222", "task_id": "0", "vnn": "4294967295", "unique_id": "9000000002"},
+      "tcon_id": "2000000002",
+      "session_id": "1000000002",
+      "machine": "192.0.2.10"
+    },
+    "2000000003": {
+      "service": "Movies",
+      "server_id": {"pid": "333", "task_id": "0", "vnn": "4294967295", "unique_id": "9000000003"},
+      "tcon_id": "2000000003",
+      "session_id": "1000000002",
+      "machine": "192.0.2.10"
+    }
+  },
+  "open_files": {
+    "/mnt/user/Content": {
+      "service_path": "/mnt/user/Content",
+      "filename": "",
+      "fileid": {"devid": 1, "inode": 1, "extid": 0},
+      "opens": {
+        "111/1": {"server_id": {"pid": "111", "task_id": "0", "vnn": "4294967295", "unique_id": "9000000001"}}
+      }
+    },
+    "/mnt/user/Content/Example Show/Example Show Season 1/Example Show - S01E01 - Pilot.mkv": {
+      "service_path": "/mnt/user/Content",
+      "filename": "Example Show/Example Show Season 1/Example Show - S01E01 - Pilot.mkv",
+      "fileid": {"devid": 1, "inode": 2, "extid": 0},
+      "opens": {
+        "222/2": {"server_id": {"pid": "222", "task_id": "0", "vnn": "4294967295", "unique_id": "9000000002"}}
+      }
+    },
+    "/mnt/user/Movies/Some Movie (2020)/Some Movie (2020).mkv": {
+      "service_path": "/mnt/user/Movies",
+      "filename": "Some Movie (2020)/Some Movie (2020).mkv",
+      "fileid": {"devid": 2, "inode": 3, "extid": 0},
+      "opens": {
+        "333/3": {"server_id": {"pid": "333", "task_id": "0", "vnn": "4294967295", "unique_id": "9000000003"}}
+      }
+    }
+  }
+}

@@ -3,7 +3,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "dormouse">
 <!ENTITY author    "kmbrimble">
-<!ENTITY version   "0.1.0">
+<!ENTITY version   "0.2.0">
 <!ENTITY launch    "Settings/Dormouse">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/kmbrimble/unraid-dormouse/main/dormouse.plg">
 <!ENTITY gitURL    "https://github.com/kmbrimble/unraid-dormouse/releases/download/v&version;">
@@ -15,6 +15,13 @@
 <PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" support="https://github.com/kmbrimble/unraid-dormouse" min="7.0" icon="moon-o">
 
 <CHANGES>
+###0.2.0
+- Observation mode: unifies smbstatus -j polling and an inotifywait watcher
+  over the pool-side watch dirs into an `activity` table (SQLite, under
+  /mnt/cache/appdata/dormouse/, never on flash). Settings page shows a live,
+  read-only activity view. Still moves nothing — no rename/unlink/copy/link
+  code exists anywhere in the shipped tree. Upgrades the Phase 1
+  comment-only dormouse.cfg to real defaults in place.
 ###0.1.0
 - Initial scaffold release: plugin installs, registers an empty Settings/Dormouse
   page, and runs a no-op supervised daemon (rc.dormouse / dormoused). No
@@ -58,8 +65,24 @@ upgradepkg --install-new &plgPATH;/&name;-&version;.txz
 
 mkdir -p &plgPATH;
 
-if [[ ! -f &plgPATH;/&name;.cfg ]]; then
-  echo '# Dormouse configuration - Phase 1 scaffold, no settings yet.' > &plgPATH;/&name;.cfg
+# The Phase 1 release seeded a comment-only placeholder cfg. Detect that
+# shape (no real key=value lines) and replace it with real defaults on
+# upgrade — but never touch a cfg that already has user-set keys in it, this
+# file is user config from here on.
+CFG="&plgPATH;/&name;.cfg"
+if [[ ! -f "$CFG" ]] || ! grep -qE '^[A-Za-z_]+=' "$CFG"; then
+  {
+    echo '# Dormouse configuration'
+    echo 'watched_shares=Content,Kieren,Teegan,Downloads,Filing Cabinet,Photos'
+    echo 'pool_root=/mnt/snowflake'
+    echo 'cache_root=/mnt/cache'
+    echo 'smb_poll_seconds=15'
+    echo 'watch_depth=2'
+    echo 'watch_refresh_minutes=15'
+    echo 'plex_ip=192.168.0.13'
+    echo 'activity_retain_days=30'
+    echo 'db_path=/mnt/cache/appdata/dormouse/manifest.db'
+  } > "$CFG"
 fi
 
 if [[ -f &emhttp;/scripts/rc.dormouse ]]; then

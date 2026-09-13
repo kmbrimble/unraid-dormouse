@@ -1,15 +1,24 @@
 #!/usr/bin/php
 <?php
 /**
- * Dormouse daemon — Phase 1 scaffold. No-op: writes its pid, logs
- * start/stop, sleeps, exits cleanly on SIGTERM. No tiering logic yet.
+ * Dormouse daemon — Phase 2, observation mode. Polls smbstatus -j and runs a
+ * long-running inotifywait child over the pool-side watch dirs, unifying
+ * both into the `activity` table. Moves nothing: this file must never call
+ * any filesystem move, rename or delete primitive on anything under
+ * pool_root or cache_root — enforced by tests/run.php's grep test over the
+ * whole tree.
  *
- * Paths are overridable via DORMOUSE_PIDFILE / DORMOUSE_LOG so tests can
- * exercise this without touching /var/run or /var/log.
+ * Paths are overridable via DORMOUSE_PIDFILE / DORMOUSE_LOG / DORMOUSE_CFG /
+ * DORMOUSE_RUNDIR so tests can exercise this without touching real paths.
  */
+declare(strict_types=1);
+
+require __DIR__ . '/lib.php';
 
 $pidFile = getenv('DORMOUSE_PIDFILE') ?: '/var/run/dormouse.pid';
 $logFile = getenv('DORMOUSE_LOG') ?: '/var/log/dormouse.log';
+$cfgFile = getenv('DORMOUSE_CFG') ?: '/boot/config/plugins/dormouse/dormouse.cfg';
+$runDir = getenv('DORMOUSE_RUNDIR') ?: '/var/run/dormouse';
 
 function dormouse_log(string $logFile, string $message): void
 {
@@ -17,8 +26,72 @@ function dormouse_log(string $logFile, string $message): void
     file_put_contents($logFile, $line, FILE_APPEND);
 }
 
+function dormouse_start_inotify_child(array $watchDirs, string $runDir, string $logFile): ?array
+{
+    if (!is_dir($runDir)) {
+        mkdir($runDir, 0755, true);
+    }
+    $listFile = $runDir . '/watch.list';
+    file_put_contents($listFile, implode("\n", $watchDirs) . "\n");
+
+    $binary = trim((string) shell_exec('command -v inotifywait 2>/dev/null'));
+    if ($binary === '') {
+        dormouse_log($logFile, 'inotifywait binary not found — Source B disabled');
+        return null;
+    }
+    if (count($watchDirs) === 0) {
+        dormouse_log($logFile, 'no watch dirs to monitor — Source B idle');
+        return null;
+    }
+
+    $cmd = [$binary, '-m', '-e', 'open,access,close_nowrite', '--format', '%w|%f|%e', '--fromfile', $listFile];
+    $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+    $proc = proc_open($cmd, $descriptors, $pipes);
+    if ($proc === false) {
+        dormouse_log($logFile, 'failed to start inotifywait');
+        return null;
+    }
+    fclose($pipes[0]);
+    stream_set_blocking($pipes[1], false);
+    stream_set_blocking($pipes[2], false);
+    dormouse_log($logFile, sprintf('inotifywait started watching %d dirs', count($watchDirs)));
+    return ['proc' => $proc, 'stdout' => $pipes[1], 'stderr' => $pipes[2], 'buffer' => ''];
+}
+
+function dormouse_stop_inotify_child(?array &$child, string $logFile): void
+{
+    if ($child === null) {
+        return;
+    }
+    @fclose($child['stdout']);
+    @fclose($child['stderr']);
+    proc_terminate($child['proc']);
+    proc_close($child['proc']);
+    dormouse_log($logFile, 'inotifywait stopped');
+    $child = null;
+}
+
+/** Drains whatever is currently available on the child's stdout, non-blocking. */
+function dormouse_drain_inotify(array &$child): array
+{
+    $lines = [];
+    $chunk = fread($child['stdout'], 65536);
+    if ($chunk === false || $chunk === '') {
+        return $lines;
+    }
+    $child['buffer'] .= $chunk;
+    while (($pos = strpos($child['buffer'], "\n")) !== false) {
+        $lines[] = substr($child['buffer'], 0, $pos);
+        $child['buffer'] = substr($child['buffer'], $pos + 1);
+    }
+    return $lines;
+}
+
 file_put_contents($pidFile, getmypid() . PHP_EOL);
 dormouse_log($logFile, 'dormoused started (pid ' . getmypid() . ')');
+
+$config = dormouse_load_config($cfgFile);
+$db = dormouse_open_db($config['db_path']);
 
 $running = true;
 pcntl_async_signals(true);
@@ -26,8 +99,96 @@ pcntl_signal(SIGTERM, function () use (&$running) {
     $running = false;
 });
 
+$watchDirs = dormouse_build_watch_dirs($config['pool_root'], $config['watched_shares'], $config['watch_depth']);
+dormouse_log($logFile, sprintf('watch refresh: %d dirs found', count($watchDirs)));
+dormouse_set_watch_stats($db, count($watchDirs));
+$inotifyChild = dormouse_start_inotify_child($watchDirs, $runDir, $logFile);
+
+$smbSeen = [];
+$accessBuffer = []; // key => ['share','rel_path','first_ts','count']
+$lastSmbPoll = 0;
+$lastWatchRefresh = time();
+$lastTrim = 0;
+$accessWindowSeconds = 60;
+
 while ($running) {
-    sleep(1);
+    if ($inotifyChild !== null) {
+        $read = [$inotifyChild['stdout']];
+        $write = null;
+        $except = null;
+        $result = @stream_select($read, $write, $except, 1);
+        if ($result === false) {
+            // interrupted by our own SIGTERM handler — loop will re-check $running
+            continue;
+        }
+        foreach (dormouse_drain_inotify($inotifyChild) as $line) {
+            if (dormouse_inotify_line_is_overflow($line)) {
+                dormouse_stat_incr($db, 'inotify_overflow_count');
+                dormouse_log($logFile, 'IN_Q_OVERFLOW: ' . $line);
+                continue;
+            }
+            $parsed = dormouse_parse_inotify_line($line);
+            if ($parsed === null || in_array('ISDIR', $parsed['events'], true)) {
+                continue;
+            }
+            $mapped = dormouse_inotify_dir_to_share($parsed['dir'], $config['pool_root'], $config['watched_shares']);
+            if ($mapped === null) {
+                continue;
+            }
+            [$share, $subPath] = $mapped;
+            $relPath = $subPath === '' ? $parsed['file'] : $subPath . '/' . $parsed['file'];
+
+            if (in_array('ACCESS', $parsed['events'], true)) {
+                dormouse_accumulate_access($accessBuffer, $share, $relPath, time());
+            }
+            if (in_array('OPEN', $parsed['events'], true)) {
+                dormouse_record_activity($db, time(), $relPath, $share, '', 'inotify', 'open');
+            }
+            if (in_array('CLOSE_NOWRITE', $parsed['events'], true)) {
+                dormouse_record_activity($db, time(), $relPath, $share, '', 'inotify', 'close');
+            }
+        }
+    } else {
+        sleep(1);
+    }
+
+    $now = time();
+
+    dormouse_flush_expired_access($db, $accessBuffer, $now, $accessWindowSeconds);
+
+    if ($now - $lastSmbPoll >= $config['smb_poll_seconds']) {
+        $binary = trim((string) shell_exec('command -v smbstatus 2>/dev/null'));
+        if ($binary !== '') {
+            $json = shell_exec('smbstatus -j 2>/dev/null');
+            $handles = dormouse_parse_smbstatus_json((string) $json, $config['watched_shares']);
+            [$rows, $smbSeen] = dormouse_smb_diff($handles, $smbSeen);
+            foreach ($rows as $row) {
+                dormouse_record_activity($db, $now, $row['rel_path'], $row['share'], $row['client_ip'], 'smb', $row['event']);
+            }
+        }
+        $lastSmbPoll = $now;
+    }
+
+    if ($now - $lastWatchRefresh >= $config['watch_refresh_minutes'] * 60) {
+        $start = microtime(true);
+        $newWatchDirs = dormouse_build_watch_dirs($config['pool_root'], $config['watched_shares'], $config['watch_depth']);
+        $duration = microtime(true) - $start;
+        dormouse_log($logFile, sprintf('watch refresh: %d dirs found in %.2fs', count($newWatchDirs), $duration));
+        dormouse_set_watch_stats($db, count($newWatchDirs));
+        if ($newWatchDirs !== $watchDirs) {
+            dormouse_stop_inotify_child($inotifyChild, $logFile);
+            $watchDirs = $newWatchDirs;
+            $inotifyChild = dormouse_start_inotify_child($watchDirs, $runDir, $logFile);
+        }
+        $lastWatchRefresh = $now;
+    }
+
+    if ($now - $lastTrim >= 3600) {
+        dormouse_trim_activity($db, $config['activity_retain_days'], $now);
+        $lastTrim = $now;
+    }
 }
 
+dormouse_flush_all_access($db, $accessBuffer, time());
+dormouse_stop_inotify_child($inotifyChild, $logFile);
 dormouse_log($logFile, 'dormoused stopping (pid ' . getmypid() . ')');
