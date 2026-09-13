@@ -260,18 +260,55 @@ and is verified on the live host before the next phase starts.
 
 ## Live-host verification gates — Phase 2
 
-Gate results — pending. Each of G1–G5 below (PLAN.md §8 Phase 2), plus the
-end-to-end inotify check, must be recorded here with method, date, observed
-result, and cleanup confirmation before Phase 3 starts.
+All run 2026-09-13, on the host, immediately after `install-on-host.sh 0.2.0`
+upgraded 0.1.0 in place. Each probe cleaned up after itself (confirmed below).
 
-- G1 — shfs union probe (Content, `only` on snowflake, cache copy visible
-  under `/mnt/user`):
-- G2 — hold-directory visibility (`/mnt/snowflake/.dormouse` auto-promoted to
-  a share or not):
-- G3 — `inotifywait -m -r` new-directory behaviour under a probe dir:
-- G4 — `IN_Q_OVERFLOW` under a real ≥10GB read (overflow counter, coalesced
-  row count, daemon survival):
-- G5 — Plex directory-watch handles recorded as `dirwatch`, not `open`:
-- End-to-end: an ssh `cat` of a small Content file appears as an `inotify`
-  activity row within a minute, checked via both `/mnt/snowflake/...` and
-  `/mnt/user/...` paths.
+- **G1 — shfs union probe: PASS.** `touch /mnt/cache/Content/.dormouse-probe`,
+  confirmed visible at `/mnt/user/Content/.dormouse-probe`, removed it,
+  confirmed gone from `/mnt/user` too. The `only`-on-snowflake share's cache
+  copy is transparently unioned in, as PLAN.md assumed.
+- **G2 — hold-directory visibility: does NOT auto-promote.**
+  `mkdir /mnt/snowflake/.dormouse`, waited 10s: absent from both
+  `ls /mnt/user/` and `ls /boot/config/shares/`. `rmdir`'d it. Unraid does
+  **not** turn a dot-prefixed top-level pool directory into a share on this
+  host — the preferred hold location
+  (`/mnt/snowflake/.dormouse/hold/<share>/<relpath>`) from PLAN.md §4 is
+  usable as-is; the in-share fallback is not needed. Decision for Phase 4.
+- **G3 — `inotifywait -m -r` new-directory behaviour: auto-adds.** Under
+  `/mnt/snowflake/Content/.dormouse-probe-g3/`, started `inotifywait -m -r`,
+  created a subdirectory, created and read a file inside it. Output included
+  `Watching new directory .../newsub/` and delivered CREATE/OPEN/ACCESS/
+  CLOSE_NOWRITE for the new file. `-r` does pick up directories created after
+  start on this host/inotify-tools version — not used by Phase 2's
+  fixed-depth-plus-periodic-refresh design, but recorded as a live option for
+  Phase 3+. Probe dir removed after.
+- **G4 — `IN_Q_OVERFLOW` under a real large read: no overflow, daemon
+  survived.** Found a real Content episode ≥10GB
+  (`find ... -size +10G -print -quit`), `cat` to `/dev/null` (19s). After the
+  60s coalescing window: `inotify_overflow_count` stat key absent (never
+  incremented), one coalesced `access` row with `count=28004`, plus one
+  `open` and one `close` row — not ~28,000 individual rows. Daemon's pid was
+  unchanged before/after (no crash/restart). `IN_Q_OVERFLOW` handling
+  remains code-reviewed but not exercised — the drain loop comfortably
+  outran this read.
+- **G5 — Plex directory-watch handles: file-open half confirmed, dirwatch
+  half not observed live.** No Plex session was connected during this
+  window, so no root-directory handle existed to capture. Generated a real
+  SMB file open instead (`smbclient //127.0.0.1/Content -N -c 'get ...'`,
+  chosen to run ~18s so multiple 15s daemon polls would catch it): live
+  `smbstatus -j` showed the open handle across 6 consecutive polls, and the
+  `activity` table recorded `source=smb, event=open` then `close`, with
+  `client_ip=127.0.0.1` (resolved via `tcon.machine`, confirming the IP path
+  works end to end on real Samba output, not just the fixture). The
+  dirwatch-vs-open discrimination itself (root handle → `.` or `""` →
+  `dirwatch`) is unit-tested against the earlier live capture's shape but
+  **was not confirmed against a live Plex root handle** — recheck once Plex
+  is actively browsing during the evidence week; if Samba reports something
+  other than `.`/`""` for this host's actual Plex session, `dormouse_parse_smbstatus_json()`
+  in `plugin/scripts/lib.php` needs a third case added.
+- **End-to-end: PASS, both paths.** A `cat` of a small Content file via
+  `/mnt/user/Content/...` (not `/mnt/snowflake/...` directly) produced
+  `open`/`close`/coalesced-`access` rows on the ZFS-side watch within the
+  minute — confirms shfs reads route down to the pool path the daemon
+  actually watches. (The ≥10GB G4 read was done directly via
+  `/mnt/snowflake/...` and also confirmed.)
