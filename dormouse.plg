@@ -36,6 +36,14 @@ CLAUDE.md rule 4.
 <INLINE>
 set -e
 
+# Stop any already-running daemon from a previous version first — rc.dormouse's
+# start is idempotent (a no-op while a live pid exists), so without this an
+# upgrade would silently leave the OLD process running under the newly
+# unpacked files instead of restarting it.
+if [[ -f &emhttp;/scripts/rc.dormouse ]]; then
+  bash &emhttp;/scripts/rc.dormouse stop || true
+fi
+
 # Remove any previously installed package version before upgrading — leaves
 # no stale package entry in /var/log/packages from an older release. Looped
 # over /var/log/packages/ rather than a bare `removepkg &name;-*` glob, since

@@ -24,18 +24,37 @@ done
 VERSION="${VERSION:-$(sed -rn 's|^<!ENTITY version[[:space:]]+"([^"]+)">.*|\1|p' "$REPO_ROOT/$PLG")}"
 PLG_URL="https://raw.githubusercontent.com/kmbrimble/unraid-dormouse/main/$PLG"
 
-echo "waiting for raw.githubusercontent.com to serve version $VERSION..."
+# The release workflow commits the real md5 onto main AFTER building — wait for
+# that commit to exist upstream, and pin to ITS md5, not merely "any non-
+# placeholder md5". Waiting for the CDN to match a same-looking-but-wrong md5
+# from a stale, previously-released version would pass this check and then
+# fail the plugin manager's own MD5 verification on install.
+git -C "$REPO_ROOT" fetch -q origin main
+EXPECTED_PLG="$(git -C "$REPO_ROOT" show "origin/main:$PLG")"
+EXPECTED_VERSION="$(sed -rn 's|^<!ENTITY version[[:space:]]+"([^"]+)">.*|\1|p' <<<"$EXPECTED_PLG")"
+EXPECTED_MD5="$(sed -rn 's|^<!ENTITY md5[[:space:]]+"([^"]+)">.*|\1|p' <<<"$EXPECTED_PLG")"
+
+if [[ "$EXPECTED_VERSION" != "$VERSION" ]]; then
+    echo "ERROR: origin/main has version $EXPECTED_VERSION, expected $VERSION — has the release workflow run yet?" >&2
+    exit 1
+fi
+if [[ -z "$EXPECTED_MD5" || "$EXPECTED_MD5" == "00000000000000000000000000000000" ]]; then
+    echo "ERROR: origin/main's dormouse.plg still has the placeholder md5 — release workflow has not written the real one back yet" >&2
+    exit 1
+fi
+
+echo "waiting for raw.githubusercontent.com to serve version $VERSION with md5 $EXPECTED_MD5..."
 ATTEMPTS=40
 for i in $(seq 1 "$ATTEMPTS"); do
     RAW="$(curl -fsSL -H 'Cache-Control: no-cache' "$PLG_URL" || true)"
     REMOTE_VERSION="$(sed -rn 's|^<!ENTITY version[[:space:]]+"([^"]+)">.*|\1|p' <<<"$RAW")"
     REMOTE_MD5="$(sed -rn 's|^<!ENTITY md5[[:space:]]+"([^"]+)">.*|\1|p' <<<"$RAW")"
-    if [[ "$REMOTE_VERSION" == "$VERSION" && -n "$REMOTE_MD5" && "$REMOTE_MD5" != "00000000000000000000000000000000" ]]; then
+    if [[ "$REMOTE_VERSION" == "$VERSION" && "$REMOTE_MD5" == "$EXPECTED_MD5" ]]; then
         echo "CDN serving $VERSION (md5 $REMOTE_MD5) after $i attempt(s)"
         break
     fi
     if [[ "$i" == "$ATTEMPTS" ]]; then
-        echo "ERROR: CDN never converged on version $VERSION after $ATTEMPTS attempts" >&2
+        echo "ERROR: CDN never converged on version $VERSION / md5 $EXPECTED_MD5 after $ATTEMPTS attempts" >&2
         exit 1
     fi
     sleep 15

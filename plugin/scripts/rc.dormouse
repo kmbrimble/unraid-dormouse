@@ -16,7 +16,7 @@ start() {
         return 0
     fi
     rm -f "$PIDFILE"
-    DORMOUSE_PIDFILE="$PIDFILE" DORMOUSE_LOG="$LOGFILE" "$DAEMON" >>"$LOGFILE" 2>&1 &
+    DORMOUSE_PIDFILE="$PIDFILE" DORMOUSE_LOG="$LOGFILE" "$DAEMON" </dev/null >>"$LOGFILE" 2>&1 &
     disown
     echo "dormouse started"
 }

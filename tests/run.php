@@ -78,6 +78,14 @@ t('the .txz FILE block has an MD5 and no sidecar/md5 FILE exists', function () u
 
 // --- strcmp version guard ---------------------------------------------------
 
+t('install block stops the daemon before upgradepkg, so an upgrade cannot leave the old process running', function () use ($plgRaw) {
+    $stopPos = strpos($plgRaw, 'rc.dormouse stop');
+    $upgradePos = strpos($plgRaw, 'upgradepkg --install-new');
+    assert_true($stopPos !== false, 'no rc.dormouse stop call found');
+    assert_true($upgradePos !== false, 'no upgradepkg call found');
+    assert_true($stopPos < $upgradePos, 'rc.dormouse stop must run before upgradepkg, or an upgrade leaves the old daemon running under the new files');
+});
+
 t('version guard accepts 0.1.0 -> 0.1.1', function () {
     assert_true(version_sorts_after('0.1.0', '0.1.1'));
 });
