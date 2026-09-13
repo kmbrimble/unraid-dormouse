@@ -9,7 +9,7 @@
 <!ENTITY gitURL    "https://github.com/kmbrimble/unraid-dormouse/releases/download/v&version;">
 <!ENTITY plgPATH   "/boot/config/plugins/&name;">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
-<!ENTITY md5       "c1b1d7daa348b6b9727faa0ce81a6ddb">
+<!ENTITY md5       "d413460ddbd256a44a9aa6af8be30c9a">
 ]>
 
 <PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" support="https://github.com/kmbrimble/unraid-dormouse" min="7.0" icon="moon-o">
