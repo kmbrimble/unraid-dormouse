@@ -1,0 +1,17 @@
+Menu="Utilities"
+Title="Dormouse"
+Icon="moon-o"
+Tabs="false"
+Markdown="false"
+---
+<?php
+$pidFile = '/var/run/dormouse.pid';
+$running = false;
+if (file_exists($pidFile)) {
+    $pid = (int) trim((string) file_get_contents($pidFile));
+    $running = $pid > 0 && posix_kill($pid, 0);
+}
+?>
+<h1>Dormouse</h1>
+<p>Phase 1 — no functionality yet.</p>
+<p>Service status: <b><?= $running ? 'running' : 'stopped' ?></b></p>

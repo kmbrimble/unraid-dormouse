@@ -1,0 +1,33 @@
+#!/usr/bin/php
+<?php
+/**
+ * Dormouse daemon — Phase 1 scaffold. No-op: writes its pid, logs
+ * start/stop, sleeps, exits cleanly on SIGTERM. No tiering logic yet.
+ *
+ * Paths are overridable via DORMOUSE_PIDFILE / DORMOUSE_LOG so tests can
+ * exercise this without touching /var/run or /var/log.
+ */
+
+$pidFile = getenv('DORMOUSE_PIDFILE') ?: '/var/run/dormouse.pid';
+$logFile = getenv('DORMOUSE_LOG') ?: '/var/log/dormouse.log';
+
+function dormouse_log(string $logFile, string $message): void
+{
+    $line = sprintf('[%s] %s%s', date('Y-m-d H:i:s'), $message, PHP_EOL);
+    file_put_contents($logFile, $line, FILE_APPEND);
+}
+
+file_put_contents($pidFile, getmypid() . PHP_EOL);
+dormouse_log($logFile, 'dormoused started (pid ' . getmypid() . ')');
+
+$running = true;
+pcntl_async_signals(true);
+pcntl_signal(SIGTERM, function () use (&$running) {
+    $running = false;
+});
+
+while ($running) {
+    sleep(1);
+}
+
+dormouse_log($logFile, 'dormoused stopping (pid ' . getmypid() . ')');

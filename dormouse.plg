@@ -1,0 +1,88 @@
+<?xml version="1.0" standalone="yes"?>
+
+<!DOCTYPE PLUGIN [
+<!ENTITY name      "dormouse">
+<!ENTITY author    "kmbrimble">
+<!ENTITY version   "0.1.0">
+<!ENTITY launch    "Settings/Dormouse">
+<!ENTITY pluginURL "https://raw.githubusercontent.com/kmbrimble/unraid-dormouse/main/dormouse.plg">
+<!ENTITY gitURL    "https://github.com/kmbrimble/unraid-dormouse/releases/download/v&version;">
+<!ENTITY plgPATH   "/boot/config/plugins/&name;">
+<!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
+<!ENTITY md5       "00000000000000000000000000000000">
+]>
+
+<PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" support="https://github.com/kmbrimble/unraid-dormouse" min="7.0" icon="moon-o">
+
+<CHANGES>
+###0.1.0
+- Initial scaffold release: plugin installs, registers an empty Settings/Dormouse
+  page, and runs a no-op supervised daemon (rc.dormouse / dormoused). No
+  tiering logic yet — this release proves the packaging and release pipeline.
+</CHANGES>
+
+<FILE Name="&plgPATH;/&name;-&version;.txz">
+<URL>&gitURL;/&name;-&version;.txz</URL>
+<MD5>&md5;</MD5>
+</FILE>
+
+<!--
+Install step. Every script invoked below is checked with `-f` (file exists),
+never `-x` (executable bit) — SecretsMan's uninstall once silently never ran
+because its script had no shebang and was gated on `-x` instead of `-f`. See
+CLAUDE.md rule 4.
+-->
+<FILE Run="/bin/bash">
+<INLINE>
+set -e
+
+# Remove any previously installed package version before upgrading — leaves
+# no stale package entry in /var/log/packages from an older release. Looped
+# over /var/log/packages/ rather than a bare `removepkg &name;-*` glob, since
+# removepkg looks packages up by name there, not by matching the shell's CWD.
+for pkg in /var/log/packages/&name;-*; do
+  if [[ -f "$pkg" ]]; then
+    removepkg "$(basename "$pkg")"
+  fi
+done
+
+upgradepkg --install-new &plgPATH;/&name;-&version;.txz
+
+mkdir -p &plgPATH;
+
+if [[ ! -f &plgPATH;/&name;.cfg ]]; then
+  echo '# Dormouse configuration - Phase 1 scaffold, no settings yet.' > &plgPATH;/&name;.cfg
+fi
+
+if [[ -f &emhttp;/scripts/rc.dormouse ]]; then
+  bash &emhttp;/scripts/rc.dormouse start
+fi
+
+echo "&name;: install complete"
+</INLINE>
+</FILE>
+
+<!--
+Remove step. Pre-release: nothing to preserve, so this reverts cleanly —
+stops the daemon, removes the package, the installed tree, the flash config
+dir, and any runtime pid/log leftovers.
+-->
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+if [[ -f &emhttp;/scripts/rc.dormouse ]]; then
+  bash &emhttp;/scripts/rc.dormouse stop || true
+fi
+
+removepkg &name;-&version; || true
+
+rm -rf &emhttp;
+rm -rf &plgPATH;
+
+rm -f /var/run/dormouse.pid
+rm -f /var/log/dormouse.log
+
+echo "&name;: removed"
+</INLINE>
+</FILE>
+
+</PLUGIN>
