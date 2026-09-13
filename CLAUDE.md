@@ -109,6 +109,28 @@ build plan for the exact commands used):
   `python3`, not on the host. The release workflow's strcmp guard runs on the
   GitHub-hosted runner, which has PHP, via `scripts/version-sorts-after.php`.
 
+## Dev-environment fact: this container shares the live host
+
+Verified 2026-09-13: `docker images` in this dev container lists the live
+production containers (Immich, Radarr, PlexCache-D, etc.), and a process
+started in this container is visible via `ps` over `ssh
+root@192.168.0.10` under its own real pid. This container is not an isolated
+build sandbox — it shares the host's docker daemon and process namespace with
+the actual Unraid box `scripts/*-on-host.sh` ssh into. Two consequences:
+
+- Never `docker run` anything here to get a tool (e.g. a throwaway PHP image)
+  — it starts a real container on the production NAS. Missing local tooling
+  (this container has no PHP) has to be worked around some other way, or left
+  to CI, which runs on an isolated GitHub-hosted runner.
+- Any `pgrep -f` (or similar) run against this host will match THIS agent
+  session's own process if the pattern is a substring of the task prompt —
+  the prompt is visible in `ps` output verbatim. `scripts/uninstall-on-host.sh`
+  hit this twice while being debugged: first matching a bare `dormoused`
+  substring, then matching its own `pgrep -f '...'` invocation's quoted
+  argument after being narrowed to a full path. Match a specific-enough
+  pattern and bracket one character of it (`[d]ormoused`) so pgrep's own
+  invoking shell can't self-match.
+
 ## Repo layout
 
 ```
