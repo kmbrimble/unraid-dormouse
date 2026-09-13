@@ -32,9 +32,13 @@ check_absent "/var/log/plugins/dormouse.plg" "[[ -f /var/log/plugins/dormouse.pl
 # Match the installed daemon's full absolute path, not the bare word
 # "dormoused" — this host also runs long-lived processes (e.g. an agent
 # session) whose command line can legitimately quote text that mentions
-# "dormoused", and a bare `pgrep -f dormoused` (bracket-trick or not) matches
-# those too. The absolute install path cannot collide with unrelated prose.
-check_absent "dormoused process" "pgrep -f '/usr/local/emhttp/plugins/dormouse/scripts/dormoused'"
+# "dormoused", and a bare `pgrep -f dormoused` matches those too. The
+# absolute install path is specific enough to avoid that, but pgrep -f also
+# matches its OWN invoking shell (`sh -c "pgrep -f '...'"` has the pattern
+# text in ITS argv, and pgrep only excludes its own pid, not its parent's) —
+# so the single-character bracket still has to stay, on the last path
+# segment, to keep the invoking shell's literal argument from self-matching.
+check_absent "dormoused process" "pgrep -f '/usr/local/emhttp/plugins/dormouse/scripts/[d]ormoused'"
 
 check_absent "/var/run/dormouse.pid" "[[ -f /var/run/dormouse.pid ]]"
 check_absent "dormouse entry in /var/log/packages/" "ls /var/log/packages/ | grep -q '^dormouse-'"
