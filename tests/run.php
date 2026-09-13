@@ -249,8 +249,9 @@ t('dormouse.plg only rewrites the cfg when no real key=value line is present', f
 // --- Phase 2: manifest db -------------------------------------------------------
 
 t('schema creation is idempotent and uses WAL mode', function () {
-    $tmp = tempnam(sys_get_temp_dir(), 'dormouse-db-') . '.sqlite';
-    unlink($tmp);
+    $tmpBase = tempnam(sys_get_temp_dir(), 'dormouse-db-');
+    unlink($tmpBase);
+    $tmp = $tmpBase . '.sqlite';
     $db1 = dormouse_open_db($tmp);
     $db1->close();
     $db2 = dormouse_open_db($tmp); // must not throw on existing schema
@@ -273,8 +274,9 @@ t('dormouse_open_db creates the appdata directory if absent', function () {
 });
 
 t('activity trim removes rows older than the retention window, keeps newer ones', function () {
-    $tmp = tempnam(sys_get_temp_dir(), 'dormouse-trim-') . '.sqlite';
-    unlink($tmp);
+    $tmpBase = tempnam(sys_get_temp_dir(), 'dormouse-trim-');
+    unlink($tmpBase);
+    $tmp = $tmpBase . '.sqlite';
     $db = dormouse_open_db($tmp);
     $now = 1_000_000_000;
     dormouse_record_activity($db, $now - (40 * 86400), 'old.mkv', 'Content', '', 'inotify', 'open');
@@ -392,8 +394,9 @@ t('watch-list generation is bounded by depth against a real temp tree', function
 });
 
 t('access events coalesce into one activity row per file per window, with a count', function () {
-    $tmp = tempnam(sys_get_temp_dir(), 'dormouse-coalesce-') . '.sqlite';
-    unlink($tmp);
+    $tmpBase = tempnam(sys_get_temp_dir(), 'dormouse-coalesce-');
+    unlink($tmpBase);
+    $tmp = $tmpBase . '.sqlite';
     $db = dormouse_open_db($tmp);
     $buffer = [];
     $t0 = 1_000_000_000;
@@ -416,8 +419,9 @@ t('access events coalesce into one activity row per file per window, with a coun
 });
 
 t('shutdown flushes buffered access counts even if the window has not elapsed', function () {
-    $tmp = tempnam(sys_get_temp_dir(), 'dormouse-flushall-') . '.sqlite';
-    unlink($tmp);
+    $tmpBase = tempnam(sys_get_temp_dir(), 'dormouse-flushall-');
+    unlink($tmpBase);
+    $tmp = $tmpBase . '.sqlite';
     $db = dormouse_open_db($tmp);
     $buffer = [];
     dormouse_accumulate_access($buffer, 'Content', 'show/ep1.mkv', time());
