@@ -90,6 +90,7 @@ if [[ ! -f "$CFG" ]] || ! grep -qE '^[A-Za-z_]+=' "$CFG"; then
     echo 'plex_ip=192.168.0.13'
     echo 'activity_retain_days=30'
     echo 'db_path=/mnt/cache/appdata/dormouse/manifest.db'
+    echo 'pool_disk_prefix=snowflake'
   } > "$CFG"
 fi
 
