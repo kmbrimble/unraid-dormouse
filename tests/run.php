@@ -493,10 +493,15 @@ t('disks.ini parsing tolerates CRLF line endings', function () {
     assert_eq('5', $sections['snowflake']['numReads']);
 });
 
-t('pool disk names are derived from pool_disk_prefix, in section order, excluding cache/parity/flash', function () use ($repoRoot) {
+t('pool disk names are derived from pool_disk_prefix, sorted, excluding cache/parity/flash', function () use ($repoRoot) {
     $sections = dormouse_parse_disks_ini(file_get_contents($repoRoot . '/tests/fixtures/disks.ini'));
     $names = dormouse_pool_disk_names($sections, 'snowflake');
     assert_eq(['snowflake', 'snowflake2', 'snowflake3', 'snowflake4', 'snowflake5', 'snowflake6'], $names);
+});
+
+t('pool disk name sorting is a plain string sort, not natural sort (a latent trap past 9 disks in one pool)', function () {
+    $sections = ['snowflake10' => [], 'snowflake2' => [], 'snowflake' => []];
+    assert_eq(['snowflake', 'snowflake10', 'snowflake2'], dormouse_pool_disk_names($sections, 'snowflake'));
 });
 
 // --- Phase 2.1: Source C — transition detection -----------------------------------
@@ -548,6 +553,19 @@ t('a disk missing from the current disks.ini sections is skipped, not fatal', fu
     [$rows, $newState] = dormouse_disk_poll_tick([], ['other' => ['spundown' => '0']], ['snowflake']);
     assert_eq([], $rows);
     assert_eq([], $newState);
+});
+
+t('a previously-tracked disk that briefly vanishes from disks.ini keeps its last known state instead of losing continuity', function () {
+    $prev = ['snowflake' => ['spundown' => 0, 'numReads' => 100, 'numWrites' => 10, 'device' => 'sdc']];
+    [$rows, $newState] = dormouse_disk_poll_tick($prev, ['other' => ['spundown' => '0']], ['snowflake']);
+    assert_eq([], $rows, 'a transient disappearance must not emit a row');
+    assert_eq($prev['snowflake'], $newState['snowflake'], 'state must carry forward unchanged, not be dropped');
+
+    // when it reappears, the delta is against the carried-forward state, not a fresh baseline
+    $sections = ['snowflake' => ['device' => 'sdc', 'spundown' => '1', 'numReads' => '140', 'numWrites' => '25']];
+    [$rows2, ] = dormouse_disk_poll_tick($newState, $sections, ['snowflake']);
+    assert_eq('spindown', $rows2[0]['event'], 'a reappearance must not be treated as a fresh baseline');
+    assert_eq(40, $rows2[0]['reads_delta']);
 });
 
 // --- Phase 2.1: Source C — schema migration ---------------------------------------

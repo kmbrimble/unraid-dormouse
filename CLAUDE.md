@@ -181,9 +181,16 @@ CREATE TABLE stats (key TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0);
 
 `reads_delta`/`writes_delta` are added by `dormouse_migrate_activity_schema()`,
 guarded by `PRAGMA table_info` so it is a no-op on an already-migrated db —
-called unconditionally from `dormouse_open_db()`, so every code path that
-opens the manifest (daemon, api endpoint, tests) upgrades a 0.2.0-shaped db
-in place the first time it's opened.
+called unconditionally from `dormouse_open_db()`. **`dormouse-api.php` does
+not go through `dormouse_open_db()`** — it opens the db directly
+`SQLITE3_OPEN_READONLY` (it must never write) — so the migration only
+actually happens when `dormoused` (re)starts, which the `.plg` install block
+does immediately on every upgrade. In the brief window on a fresh upgrade
+before the daemon has started against an existing 0.2.0-shaped db, a poll of
+the API endpoint hits a `no such column` exception on `reads_delta`, which
+its existing try/catch turns into a generic "manifest database unavailable"
+JSON response rather than a crash — never assume the api endpoint migrates
+anything itself.
 
 One deviation from the PLAN.md §4 `activity` shape: a `count` column, needed
 because inotify `ACCESS` events are coalesced (at most one row per file per
@@ -243,7 +250,13 @@ start baseline happens — no separate startup code path, the first tick's
 (1→0) or `'spindown'` (0→1) row carrying `reads_delta`/`writes_delta` since
 the previous tick; no change → no row. A delta that would come out negative
 (a counter reset or wrap) is recorded as `NULL`, never a huge unsigned
-number. `stats` also gets `disk_last_poll_ts` and, per disk,
+number. `count` is overloaded for `source='disk'` rows: it holds the reads delta
+(0 for a baseline `state` row), not an event-coalescing count as it does for
+`inotify`/`smb` rows — this is a deliberate divergence from the rest of the
+table, so don't "fix" the `Dormouse.page` Count column into matching
+`smb`/`inotify` semantics without checking the source column first.
+
+`stats` also gets `disk_last_poll_ts` and, per disk,
 `disk_state_<name>` / `disk_state_<name>_since` (maintained every tick a row
 was written, read back by `dormouse_build_disk_states()` for the settings
 page's current-state line).

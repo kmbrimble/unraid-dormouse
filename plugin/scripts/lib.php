@@ -557,6 +557,16 @@ function dormouse_disk_poll_tick(array $prevState, array $sections, array $poolD
     $newState = [];
     foreach ($poolDisks as $name) {
         if (!isset($sections[$name])) {
+            // A disk missing from this tick's disks.ini read (e.g. a
+            // transient read racing emhttpd's rewrite of the tmpfs file —
+            // never proven atomic in this repo) must not be treated as a
+            // brand-new disk if it reappears next tick: carry the last
+            // known state forward instead of dropping it, so a reappearance
+            // doesn't emit a spurious baseline 'state' row and lose the
+            // reads/writes continuity needed for the next real delta.
+            if (isset($prevState[$name])) {
+                $newState[$name] = $prevState[$name];
+            }
             continue;
         }
         $sec = $sections[$name];
@@ -600,7 +610,13 @@ function dormouse_smartctl_standby(string $device): ?bool
     if ($binary === '') {
         return null;
     }
-    exec(sprintf('smartctl -n standby -i %s >/dev/null 2>&1', escapeshellarg('/dev/' . $device)), $out, $rc);
+    // Hard-capped with `timeout`: this runs inline in dormoused's main loop,
+    // right before the SIGTERM check rc.dormouse's 10s shutdown window
+    // depends on, and unlike reading disks.ini this talks to the actual
+    // device — a hung/slow response must not be able to stall the loop. If
+    // `timeout` itself is missing this degrades to no cross-check (rc 127),
+    // same as smartctl being absent.
+    exec(sprintf('timeout 3 smartctl -n standby -i %s >/dev/null 2>&1', escapeshellarg('/dev/' . $device)), $out, $rc);
     if ($rc === 2) {
         return true;
     }
