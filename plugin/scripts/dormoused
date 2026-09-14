@@ -19,6 +19,7 @@ $pidFile = getenv('DORMOUSE_PIDFILE') ?: '/var/run/dormouse.pid';
 $logFile = getenv('DORMOUSE_LOG') ?: '/var/log/dormouse.log';
 $cfgFile = getenv('DORMOUSE_CFG') ?: '/boot/config/plugins/dormouse/dormouse.cfg';
 $runDir = getenv('DORMOUSE_RUNDIR') ?: '/var/run/dormouse';
+$disksIniFile = getenv('DORMOUSE_DISKS_INI') ?: '/var/local/emhttp/disks.ini';
 
 function dormouse_log(string $logFile, string $message): void
 {
@@ -44,7 +45,7 @@ function dormouse_start_inotify_child(array $watchDirs, string $runDir, string $
         return null;
     }
 
-    $cmd = [$binary, '-m', '-e', 'open,access,close_nowrite', '--format', '%w|%f|%e', '--fromfile', $listFile];
+    $cmd = [$binary, '-m', '-e', 'open,access,close_nowrite,close_write', '--format', '%w|%f|%e', '--fromfile', $listFile];
     // stderr goes straight to the log file, never a pipe we'd have to drain
     // ourselves — inotifywait's own "Setting up watches"/"Couldn't watch"
     // lines otherwise fill the pipe buffer and block the child from ever
@@ -115,9 +116,11 @@ $inotifyChild = dormouse_start_inotify_child($watchDirs, $runDir, $logFile);
 $smbSeen = [];
 $accessBuffer = []; // key => ['share','rel_path','first_ts','count']
 $lastSmbPoll = 0;
+$lastDiskPoll = 0;
 $lastWatchRefresh = time();
 $lastTrim = 0;
 $accessWindowSeconds = 60;
+$diskState = []; // name => ['spundown','numReads','numWrites','device']
 
 while ($running) {
     if ($inotifyChild !== null) {
@@ -162,6 +165,11 @@ while ($running) {
             if (in_array('CLOSE_NOWRITE', $parsed['events'], true)) {
                 dormouse_record_activity($db, time(), $relPath, $share, '', 'inotify', 'close');
             }
+            if (in_array('CLOSE_WRITE', $parsed['events'], true)) {
+                // Uncoalesced, unlike ACCESS — a write is rare enough (and
+                // significant enough) that one row per file is fine.
+                dormouse_record_activity($db, time(), $relPath, $share, '', 'inotify', 'write');
+            }
         }
     } else {
         sleep(1);
@@ -182,6 +190,57 @@ while ($running) {
             }
         }
         $lastSmbPoll = $now;
+    }
+
+    if ($now - $lastDiskPoll >= $config['smb_poll_seconds']) {
+        // Reading disks.ini (tmpfs, emhttpd-maintained) never touches the
+        // pool — the sanctioned way to know spin state (CLAUDE.md). Do NOT
+        // stat() or otherwise poll /mnt/snowflake itself here.
+        $raw = @file_get_contents($disksIniFile);
+        if ($raw !== false) {
+            $sections = dormouse_parse_disks_ini($raw);
+            $poolDisks = dormouse_pool_disk_names($sections, $config['pool_disk_prefix']);
+            [$diskRows, $diskState] = dormouse_disk_poll_tick($diskState, $sections, $poolDisks);
+            foreach ($diskRows as $row) {
+                dormouse_record_activity(
+                    $db,
+                    $now,
+                    $row['rel_path'],
+                    '',
+                    '',
+                    'disk',
+                    $row['event'],
+                    $row['reads_delta'] ?? 0,
+                    $row['reads_delta'],
+                    $row['writes_delta']
+                );
+                [$diskName, $device] = explode('/', $row['rel_path'], 2) + [1 => ''];
+                dormouse_stat_set($db, "disk_state_$diskName", $sections[$diskName]['spundown'] === '1' ? 1 : 0);
+                dormouse_stat_set($db, "disk_state_{$diskName}_since", $now);
+
+                // Cross-check only on an actual transition, never as a regular
+                // poll — smartctl -n standby does not wake the disk, but there
+                // is no reason to shell out every tick either.
+                if ($device !== '' && ($row['event'] === 'spinup' || $row['event'] === 'spindown')) {
+                    $standby = dormouse_smartctl_standby($device);
+                    if ($standby !== null) {
+                        $iniSpundown = $sections[$diskName]['spundown'] === '1';
+                        if (!dormouse_smartctl_agrees($iniSpundown, $standby)) {
+                            dormouse_stat_incr($db, 'disk_state_disagreements');
+                            dormouse_log($logFile, sprintf(
+                                'smartctl disagrees with disks.ini for %s (%s): disks.ini spundown=%s, smartctl standby=%s',
+                                $diskName,
+                                $device,
+                                $iniSpundown ? 'true' : 'false',
+                                $standby ? 'true' : 'false'
+                            ));
+                        }
+                    }
+                }
+            }
+            dormouse_stat_set($db, 'disk_last_poll_ts', $now);
+        }
+        $lastDiskPoll = $now;
     }
 
     // Checked again here, not just at the top of the loop: a SIGTERM that

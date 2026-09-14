@@ -11,8 +11,9 @@ watches filesystem and SMB activity directly, so it works for photos, Time
 Machine backups, or anything else regularly read off slow storage, not just
 Plex libraries.
 
-**Status: Phase 2 — observation only.** The daemon polls `smbstatus -j` and
-watches pool-side directories with `inotifywait`, recording both into a
+**Status: Phase 2 — observation only.** The daemon polls `smbstatus -j`,
+watches pool-side directories with `inotifywait` (including file writes), and
+tracks per-disk spin state from `disks.ini`, recording all three into a
 SQLite activity log shown live on the settings page. It moves nothing —
 no move/copy/delete code exists anywhere in the shipped plugin tree, and a
 test enforces that.

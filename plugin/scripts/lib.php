@@ -19,6 +19,7 @@ function dormouse_default_config(): array
         'plex_ip' => '192.168.0.13',
         'activity_retain_days' => 30,
         'db_path' => '/mnt/cache/appdata/dormouse/manifest.db',
+        'pool_disk_prefix' => 'snowflake',
     ];
 }
 
@@ -91,7 +92,29 @@ function dormouse_open_db(string $dbPath): SQLite3
         key TEXT PRIMARY KEY,
         value INTEGER NOT NULL DEFAULT 0
     )');
+    dormouse_migrate_activity_schema($db);
     return $db;
+}
+
+/**
+ * Adds the reads_delta/writes_delta columns (Source C, 0.2.1) to an activity
+ * table created by 0.2.0's schema, guarded by PRAGMA table_info so it is
+ * idempotent — running it again against an already-migrated db is a no-op,
+ * never a duplicate-column error. Existing rows keep NULL for both columns.
+ */
+function dormouse_migrate_activity_schema(SQLite3 $db): void
+{
+    $cols = [];
+    $result = $db->query('PRAGMA table_info(activity)');
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $cols[$row['name']] = true;
+    }
+    if (!isset($cols['reads_delta'])) {
+        $db->exec('ALTER TABLE activity ADD COLUMN reads_delta INTEGER');
+    }
+    if (!isset($cols['writes_delta'])) {
+        $db->exec('ALTER TABLE activity ADD COLUMN writes_delta INTEGER');
+    }
 }
 
 function dormouse_record_activity(
@@ -102,9 +125,11 @@ function dormouse_record_activity(
     string $clientIp,
     string $source,
     string $event,
-    int $count = 1
+    int $count = 1,
+    ?int $readsDelta = null,
+    ?int $writesDelta = null
 ): void {
-    $stmt = $db->prepare('INSERT INTO activity (ts, rel_path, share, client_ip, source, event, count) VALUES (:ts, :rel_path, :share, :client_ip, :source, :event, :count)');
+    $stmt = $db->prepare('INSERT INTO activity (ts, rel_path, share, client_ip, source, event, count, reads_delta, writes_delta) VALUES (:ts, :rel_path, :share, :client_ip, :source, :event, :count, :reads_delta, :writes_delta)');
     $stmt->bindValue(':ts', $ts, SQLITE3_INTEGER);
     $stmt->bindValue(':rel_path', $relPath, SQLITE3_TEXT);
     $stmt->bindValue(':share', $share, SQLITE3_TEXT);
@@ -112,6 +137,8 @@ function dormouse_record_activity(
     $stmt->bindValue(':source', $source, SQLITE3_TEXT);
     $stmt->bindValue(':event', $event, SQLITE3_TEXT);
     $stmt->bindValue(':count', $count, SQLITE3_INTEGER);
+    $stmt->bindValue(':reads_delta', $readsDelta, $readsDelta === null ? SQLITE3_NULL : SQLITE3_INTEGER);
+    $stmt->bindValue(':writes_delta', $writesDelta, $writesDelta === null ? SQLITE3_NULL : SQLITE3_INTEGER);
     $stmt->execute();
 }
 
@@ -146,6 +173,16 @@ function dormouse_set_watch_stats(SQLite3 $db, int $watchCount): void
         ON CONFLICT(key) DO UPDATE SET value = :ts2');
     $stmt->bindValue(':ts', time(), SQLITE3_INTEGER);
     $stmt->bindValue(':ts2', time(), SQLITE3_INTEGER);
+    $stmt->execute();
+}
+
+function dormouse_stat_set(SQLite3 $db, string $key, int $value): void
+{
+    $stmt = $db->prepare('INSERT INTO stats (key, value) VALUES (:key, :value)
+        ON CONFLICT(key) DO UPDATE SET value = :value2');
+    $stmt->bindValue(':key', $key, SQLITE3_TEXT);
+    $stmt->bindValue(':value', $value, SQLITE3_INTEGER);
+    $stmt->bindValue(':value2', $value, SQLITE3_INTEGER);
     $stmt->execute();
 }
 
@@ -205,6 +242,10 @@ function dormouse_build_status(SQLite3 $db, array $config, string $pidFile): arr
         'overflow_count' => dormouse_stat_get($db, 'inotify_overflow_count'),
         'per_share_24h' => $perShare,
         'recent' => $recent,
+        'disk_last_poll_ts' => dormouse_stat_get($db, 'disk_last_poll_ts'),
+        'disk_state_disagreements' => dormouse_stat_get($db, 'disk_state_disagreements'),
+        'disk_states' => dormouse_build_disk_states($db),
+        'spin_events' => dormouse_build_spin_events($db),
     ];
 }
 
@@ -436,4 +477,203 @@ function dormouse_inotify_dir_to_share(string $dir, string $poolRoot, array $wat
         return null;
     }
     return [$share, $subPath];
+}
+
+// --- Source C: disks.ini spin state --------------------------------------------
+
+/**
+ * Parses /var/local/emhttp/disks.ini's ["section"]\nkey="value" shape into
+ * sections keyed by name. Tolerant of a trailing \r per line even though a
+ * live capture on 2026-09-14 showed plain LF only (CLAUDE.md) — cheap
+ * insurance against a future emhttpd build changing that.
+ *
+ * @return array<string, array<string,string>>
+ */
+function dormouse_parse_disks_ini(string $contents): array
+{
+    $sections = [];
+    $current = null;
+    foreach (explode("\n", $contents) as $line) {
+        $line = trim($line, " \t\r");
+        if ($line === '') {
+            continue;
+        }
+        if (preg_match('/^\["(.*)"\]$/', $line, $m)) {
+            $current = $m[1];
+            $sections[$current] = [];
+            continue;
+        }
+        if ($current === null) {
+            continue;
+        }
+        $eq = strpos($line, '=');
+        if ($eq === false) {
+            continue;
+        }
+        $key = substr($line, 0, $eq);
+        $value = substr($line, $eq + 1);
+        if (strlen($value) >= 2 && $value[0] === '"' && substr($value, -1) === '"') {
+            $value = substr($value, 1, -1);
+        }
+        $sections[$current][$key] = $value;
+    }
+    return $sections;
+}
+
+/** Section names belonging to the pool, i.e. starting with $prefix (default "snowflake"). */
+function dormouse_pool_disk_names(array $sections, string $prefix): array
+{
+    $names = [];
+    foreach (array_keys($sections) as $name) {
+        if (str_starts_with($name, $prefix)) {
+            $names[] = $name;
+        }
+    }
+    sort($names);
+    return $names;
+}
+
+/** A delta that would come out negative means the counter reset/wrapped — record NULL, never a huge unsigned number. */
+function dormouse_disk_delta(int $current, int $previous): ?int
+{
+    $delta = $current - $previous;
+    return $delta < 0 ? null : $delta;
+}
+
+/**
+ * Advances disk spin-state tracking by one poll tick. Disks unseen in
+ * $prevState get a baseline 'state' row (daemon startup). A spundown
+ * transition (0->1 spindown, 1->0 spinup) gets one row carrying the
+ * reads/writes deltas since the previous tick. No change: no row.
+ *
+ * @param array<string,array{spundown:int,numReads:int,numWrites:int,device:string}> $prevState
+ * @param array<string,array<string,string>> $sections raw dormouse_parse_disks_ini() output
+ * @param string[] $poolDisks section names to track
+ * @return array{0: array<int,array{rel_path:string,event:string,reads_delta:?int,writes_delta:?int}>, 1: array<string,array>}
+ */
+function dormouse_disk_poll_tick(array $prevState, array $sections, array $poolDisks): array
+{
+    $rows = [];
+    $newState = [];
+    foreach ($poolDisks as $name) {
+        if (!isset($sections[$name])) {
+            continue;
+        }
+        $sec = $sections[$name];
+        $spundown = (int) ($sec['spundown'] ?? 0);
+        $numReads = (int) ($sec['numReads'] ?? 0);
+        $numWrites = (int) ($sec['numWrites'] ?? 0);
+        $device = (string) ($sec['device'] ?? '');
+        $relPath = $name . '/' . $device;
+
+        if (!isset($prevState[$name])) {
+            $rows[] = ['rel_path' => $relPath, 'event' => 'state', 'reads_delta' => null, 'writes_delta' => null];
+        } elseif ($prevState[$name]['spundown'] !== $spundown) {
+            $rows[] = [
+                'rel_path' => $relPath,
+                'event' => $spundown === 1 ? 'spindown' : 'spinup',
+                'reads_delta' => dormouse_disk_delta($numReads, $prevState[$name]['numReads']),
+                'writes_delta' => dormouse_disk_delta($numWrites, $prevState[$name]['numWrites']),
+            ];
+        }
+
+        $newState[$name] = ['spundown' => $spundown, 'numReads' => $numReads, 'numWrites' => $numWrites, 'device' => $device];
+    }
+    return [$rows, $newState];
+}
+
+/** True if disks.ini's spundown flag agrees with a read-only smartctl standby probe, for the transition cross-check. */
+function dormouse_smartctl_agrees(bool $disksIniSpundown, bool $smartctlStandby): bool
+{
+    return $disksIniSpundown === $smartctlStandby;
+}
+
+/**
+ * Runs `smartctl -n standby -i` against a device, read-only (rc 2 = standby,
+ * rc 0 = active, without waking the disk — verified live 2026-09-14). Only
+ * ever called on a detected transition, never as a regular poll (CLAUDE.md).
+ * Returns null if smartctl isn't installed or the probe itself errored.
+ */
+function dormouse_smartctl_standby(string $device): ?bool
+{
+    $binary = trim((string) shell_exec('command -v smartctl 2>/dev/null'));
+    if ($binary === '') {
+        return null;
+    }
+    exec(sprintf('smartctl -n standby -i %s >/dev/null 2>&1', escapeshellarg('/dev/' . $device)), $out, $rc);
+    if ($rc === 2) {
+        return true;
+    }
+    if ($rc === 0) {
+        return false;
+    }
+    return null;
+}
+
+/** Distinct activity rows (excluding other disk rows) in [$fromTs, $toTs). */
+function dormouse_activity_window(SQLite3 $db, int $fromTs, int $toTs): array
+{
+    $stmt = $db->prepare("SELECT DISTINCT share, rel_path, source, event, client_ip FROM activity
+        WHERE ts >= :from AND ts < :to AND source != 'disk'");
+    $stmt->bindValue(':from', $fromTs, SQLITE3_INTEGER);
+    $stmt->bindValue(':to', $toTs, SQLITE3_INTEGER);
+    $result = $stmt->execute();
+    $rows = [];
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $rows[] = $row;
+    }
+    return $rows;
+}
+
+/** Last $limit disk spin transitions, each with the distinct activity in the 60s window before and after it. */
+function dormouse_build_spin_events(SQLite3 $db, int $limit = 30): array
+{
+    $stmt = $db->prepare("SELECT ts, rel_path, event, reads_delta, writes_delta FROM activity
+        WHERE source = 'disk' AND event IN ('spinup', 'spindown')
+        ORDER BY ts DESC LIMIT :limit");
+    $stmt->bindValue(':limit', $limit, SQLITE3_INTEGER);
+    $result = $stmt->execute();
+
+    $events = [];
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $ts = (int) $row['ts'];
+        $events[] = [
+            'ts' => $ts,
+            'disk' => $row['rel_path'],
+            'event' => $row['event'],
+            'reads_delta' => $row['reads_delta'] !== null ? (int) $row['reads_delta'] : null,
+            'writes_delta' => $row['writes_delta'] !== null ? (int) $row['writes_delta'] : null,
+            'before' => dormouse_activity_window($db, $ts - 60, $ts),
+            'after' => dormouse_activity_window($db, $ts, $ts + 60),
+        ];
+    }
+    return $events;
+}
+
+/** Disk names ever seen in the activity table (source='disk'), from their "name/device" rel_path. */
+function dormouse_known_disks(SQLite3 $db): array
+{
+    $names = [];
+    $result = $db->query("SELECT DISTINCT rel_path FROM activity WHERE source = 'disk'");
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $slash = strpos($row['rel_path'], '/');
+        $names[$slash === false ? $row['rel_path'] : substr($row['rel_path'], 0, $slash)] = true;
+    }
+    $names = array_keys($names);
+    sort($names);
+    return $names;
+}
+
+/** Per-disk current spundown flag and the timestamp it was last set, from the disk_state_* stats keys dormoused maintains every tick. */
+function dormouse_build_disk_states(SQLite3 $db): array
+{
+    $out = [];
+    foreach (dormouse_known_disks($db) as $name) {
+        $since = dormouse_stat_get($db, "disk_state_{$name}_since");
+        $out[$name] = [
+            'spundown' => (bool) dormouse_stat_get($db, "disk_state_{$name}"),
+            'since' => $since ?: null,
+        ];
+    }
+    return $out;
 }

@@ -474,6 +474,212 @@ t('dormouse-api.php returns an error JSON instead of a fatal when the db is corr
     exec('rm -rf ' . escapeshellarg($tmpDir));
 });
 
+// --- Phase 2.1: Source C — disks.ini parsing --------------------------------------
+
+t('disks.ini parsing splits sections and strips quotes, against the sanitised live-shaped fixture', function () use ($repoRoot) {
+    $contents = file_get_contents($repoRoot . '/tests/fixtures/disks.ini');
+    $sections = dormouse_parse_disks_ini($contents);
+    assert_true(isset($sections['snowflake']), 'expected a snowflake section');
+    assert_eq('sdc', $sections['snowflake']['device']);
+    assert_eq('0', $sections['snowflake']['spundown']);
+    assert_eq('1640220', $sections['snowflake']['numReads']);
+    assert_true(isset($sections['cache']), 'expected a cache section to also parse');
+    assert_true(isset($sections['snowflake6']));
+});
+
+t('disks.ini parsing tolerates CRLF line endings', function () {
+    $sections = dormouse_parse_disks_ini("[\"snowflake\"]\r\nspundown=\"1\"\r\nnumReads=\"5\"\r\n");
+    assert_eq('1', $sections['snowflake']['spundown']);
+    assert_eq('5', $sections['snowflake']['numReads']);
+});
+
+t('pool disk names are derived from pool_disk_prefix, in section order, excluding cache/parity/flash', function () use ($repoRoot) {
+    $sections = dormouse_parse_disks_ini(file_get_contents($repoRoot . '/tests/fixtures/disks.ini'));
+    $names = dormouse_pool_disk_names($sections, 'snowflake');
+    assert_eq(['snowflake', 'snowflake2', 'snowflake3', 'snowflake4', 'snowflake5', 'snowflake6'], $names);
+});
+
+// --- Phase 2.1: Source C — transition detection -----------------------------------
+
+t('first poll for a disk records a baseline state row, not a transition', function () {
+    $sections = ['snowflake' => ['device' => 'sdc', 'spundown' => '0', 'numReads' => '100', 'numWrites' => '10']];
+    [$rows, $newState] = dormouse_disk_poll_tick([], $sections, ['snowflake']);
+    assert_eq(1, count($rows));
+    assert_eq('state', $rows[0]['event']);
+    assert_eq('snowflake/sdc', $rows[0]['rel_path']);
+    assert_true($rows[0]['reads_delta'] === null, 'baseline row must not carry a delta');
+    assert_eq(['spundown' => 0, 'numReads' => 100, 'numWrites' => 10, 'device' => 'sdc'], $newState['snowflake']);
+});
+
+t('an unchanged tick produces no rows', function () {
+    $prev = ['snowflake' => ['spundown' => 0, 'numReads' => 100, 'numWrites' => 10, 'device' => 'sdc']];
+    $sections = ['snowflake' => ['device' => 'sdc', 'spundown' => '0', 'numReads' => '150', 'numWrites' => '12']];
+    [$rows, ] = dormouse_disk_poll_tick($prev, $sections, ['snowflake']);
+    assert_eq([], $rows, 'reads/writes moving without a spundown change must not emit a row');
+});
+
+t('a spundown 0->1 transition is a spindown, 1->0 is a spinup, each carrying reads/writes deltas', function () {
+    $prev = ['snowflake' => ['spundown' => 0, 'numReads' => 100, 'numWrites' => 10, 'device' => 'sdc']];
+    $sections = ['snowflake' => ['device' => 'sdc', 'spundown' => '1', 'numReads' => '140', 'numWrites' => '25']];
+    [$rows, $newState] = dormouse_disk_poll_tick($prev, $sections, ['snowflake']);
+    assert_eq(1, count($rows));
+    assert_eq('spindown', $rows[0]['event']);
+    assert_eq(40, $rows[0]['reads_delta']);
+    assert_eq(15, $rows[0]['writes_delta']);
+    assert_eq(1, $newState['snowflake']['spundown']);
+
+    $prev2 = $newState;
+    $sections2 = ['snowflake' => ['device' => 'sdc', 'spundown' => '0', 'numReads' => '141', 'numWrites' => '25']];
+    [$rows2, ] = dormouse_disk_poll_tick($prev2, $sections2, ['snowflake']);
+    assert_eq('spinup', $rows2[0]['event']);
+    assert_eq(1, $rows2[0]['reads_delta']);
+    assert_eq(0, $rows2[0]['writes_delta']);
+});
+
+t('a counter reset/wrap (current < previous) records a NULL delta, never a huge number', function () {
+    $prev = ['snowflake' => ['spundown' => 0, 'numReads' => 100000, 'numWrites' => 5000, 'device' => 'sdc']];
+    $sections = ['snowflake' => ['device' => 'sdc', 'spundown' => '1', 'numReads' => '3', 'numWrites' => '1']];
+    [$rows, ] = dormouse_disk_poll_tick($prev, $sections, ['snowflake']);
+    assert_true($rows[0]['reads_delta'] === null, 'a reset counter must yield a NULL delta');
+    assert_true($rows[0]['writes_delta'] === null);
+});
+
+t('a disk missing from the current disks.ini sections is skipped, not fatal', function () {
+    [$rows, $newState] = dormouse_disk_poll_tick([], ['other' => ['spundown' => '0']], ['snowflake']);
+    assert_eq([], $rows);
+    assert_eq([], $newState);
+});
+
+// --- Phase 2.1: Source C — schema migration ---------------------------------------
+
+t('the reads_delta/writes_delta migration is idempotent on a db created with the 0.2.0 schema, preserving existing rows', function () {
+    $tmpBase = tempnam(sys_get_temp_dir(), 'dormouse-migrate-');
+    unlink($tmpBase);
+    $tmp = $tmpBase . '.sqlite';
+
+    // Recreate the exact 0.2.0 shape by hand, not via dormouse_open_db (which
+    // already migrates) — this is the whole point of the test.
+    $db = new SQLite3($tmp);
+    $db->exec('CREATE TABLE activity (
+        ts INTEGER NOT NULL, rel_path TEXT NOT NULL, share TEXT NOT NULL,
+        client_ip TEXT NOT NULL, source TEXT NOT NULL, event TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 1
+    )');
+    $db->exec("INSERT INTO activity (ts, rel_path, share, client_ip, source, event, count) VALUES (1000, 'a.mkv', 'Content', '', 'smb', 'open', 1)");
+
+    dormouse_migrate_activity_schema($db);
+    dormouse_migrate_activity_schema($db); // must not throw the second time
+
+    $cols = [];
+    $result = $db->query('PRAGMA table_info(activity)');
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $cols[] = $row['name'];
+    }
+    assert_true(in_array('reads_delta', $cols, true));
+    assert_true(in_array('writes_delta', $cols, true));
+
+    assert_eq(1, (int) $db->querySingle('SELECT COUNT(*) FROM activity'));
+    assert_eq('a.mkv', $db->querySingle("SELECT rel_path FROM activity"));
+    assert_true($db->querySingle('SELECT reads_delta FROM activity') === null, 'pre-existing row must keep a NULL for the new column');
+
+    $db->close();
+    unlink($tmp);
+    @unlink($tmp . '-wal');
+    @unlink($tmp . '-shm');
+});
+
+t('dormouse_open_db applies the migration on a fresh db too, and dormouse_record_activity can write deltas', function () {
+    $tmpBase = tempnam(sys_get_temp_dir(), 'dormouse-freshmigrate-');
+    unlink($tmpBase);
+    $tmp = $tmpBase . '.sqlite';
+    $db = dormouse_open_db($tmp);
+    dormouse_record_activity($db, 1000, 'snowflake/sdc', '', '', 'disk', 'spinup', 40, 40, 15);
+    $row = $db->querySingle('SELECT reads_delta, writes_delta FROM activity', true);
+    assert_eq(40, (int) $row['reads_delta']);
+    assert_eq(15, (int) $row['writes_delta']);
+    $db->close();
+    unlink($tmp);
+    @unlink($tmp . '-wal');
+    @unlink($tmp . '-shm');
+});
+
+// --- Phase 2.1: Source C — smartctl cross-check ------------------------------------
+
+t('smartctl agreement check compares disks.ini spundown against smartctl standby state', function () {
+    assert_true(dormouse_smartctl_agrees(true, true));
+    assert_true(dormouse_smartctl_agrees(false, false));
+    assert_true(!dormouse_smartctl_agrees(true, false));
+    assert_true(!dormouse_smartctl_agrees(false, true));
+});
+
+// --- Phase 2.1: write visibility (close_write) -------------------------------------
+
+t('inotify line parsing recognises CLOSE_WRITE alongside the existing events', function () {
+    $parsed = dormouse_parse_inotify_line('/mnt/snowflake/Content/|new-episode.mkv|CLOSE_WRITE,CLOSE');
+    assert_eq(['CLOSE_WRITE', 'CLOSE'], $parsed['events']);
+});
+
+t('dormoused watches close_write in its inotifywait event set', function () use ($repoRoot) {
+    $src = file_get_contents($repoRoot . '/plugin/scripts/dormoused');
+    assert_true(str_contains($src, 'close_write'), 'dormoused must add close_write to the -e event list');
+    assert_true(str_contains($src, "'write'"), "dormoused must record CLOSE_WRITE as event='write'");
+});
+
+// --- Phase 2.1: spin_events window query -------------------------------------------
+
+t('dormouse_build_spin_events returns transitions with distinct activity in the surrounding 60s windows', function () {
+    $tmpBase = tempnam(sys_get_temp_dir(), 'dormouse-spinevents-');
+    unlink($tmpBase);
+    $tmp = $tmpBase . '.sqlite';
+    $db = dormouse_open_db($tmp);
+
+    dormouse_record_activity($db, 940, 'Content/show/ep1.mkv', 'Content', '192.0.2.10', 'smb', 'open');
+    dormouse_record_activity($db, 1000, 'snowflake/sdc', '', '', 'disk', 'spinup', 40, 40, 0);
+    dormouse_record_activity($db, 1050, 'Content/show/ep1.mkv', 'Content', '192.0.2.10', 'inotify', 'access', 20);
+    dormouse_record_activity($db, 1200, 'Content/show/ep2.mkv', 'Content', '192.0.2.10', 'smb', 'open'); // outside the +60s window
+
+    $events = dormouse_build_spin_events($db, 30);
+    assert_eq(1, count($events));
+    assert_eq('spinup', $events[0]['event']);
+    assert_eq('snowflake/sdc', $events[0]['disk']);
+    assert_eq(40, $events[0]['reads_delta']);
+
+    $beforePaths = array_column($events[0]['before'], 'rel_path');
+    $afterPaths = array_column($events[0]['after'], 'rel_path');
+    assert_true(in_array('Content/show/ep1.mkv', $beforePaths, true), 'the open just before the spin-up must be in the before window');
+    assert_true(in_array('Content/show/ep1.mkv', $afterPaths, true), 'the access just after the spin-up must be in the after window');
+    assert_true(!in_array('Content/show/ep2.mkv', $afterPaths, true), 'activity beyond the 60s window must be excluded');
+
+    $db->close();
+    unlink($tmp);
+    @unlink($tmp . '-wal');
+    @unlink($tmp . '-shm');
+});
+
+t('dormouse_build_disk_states reports current spundown flag and since-timestamp per known disk', function () {
+    $tmpBase = tempnam(sys_get_temp_dir(), 'dormouse-diskstates-');
+    unlink($tmpBase);
+    $tmp = $tmpBase . '.sqlite';
+    $db = dormouse_open_db($tmp);
+
+    dormouse_record_activity($db, 1000, 'snowflake/sdc', '', '', 'disk', 'state');
+    dormouse_stat_set($db, 'disk_state_snowflake', 0);
+    dormouse_stat_set($db, 'disk_state_snowflake_since', 1000);
+    dormouse_record_activity($db, 1500, 'snowflake/sdc', '', '', 'disk', 'spindown', 0, null, null);
+    dormouse_stat_set($db, 'disk_state_snowflake', 1);
+    dormouse_stat_set($db, 'disk_state_snowflake_since', 1500);
+
+    $states = dormouse_build_disk_states($db);
+    assert_true(isset($states['snowflake']));
+    assert_eq(true, $states['snowflake']['spundown']);
+    assert_eq(1500, $states['snowflake']['since']);
+
+    $db->close();
+    unlink($tmp);
+    @unlink($tmp . '-wal');
+    @unlink($tmp . '-shm');
+});
+
 // --- Phase 2: moves must be structurally impossible -------------------------------
 
 t('no move/delete code paths exist anywhere in the shipped plugin tree', function () use ($repoRoot) {

@@ -3,7 +3,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "dormouse">
 <!ENTITY author    "kmbrimble">
-<!ENTITY version   "0.2.0">
+<!ENTITY version   "0.2.1">
 <!ENTITY launch    "Settings/Dormouse">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/kmbrimble/unraid-dormouse/main/dormouse.plg">
 <!ENTITY gitURL    "https://github.com/kmbrimble/unraid-dormouse/releases/download/v&version;">
@@ -15,6 +15,14 @@
 <PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" support="https://github.com/kmbrimble/unraid-dormouse" min="7.0" icon="moon-o">
 
 <CHANGES>
+###0.2.1
+- Source C: per-disk spin-state log from /var/local/emhttp/disks.ini (never
+  from touching the pool). Records spinup/spindown transitions with
+  reads/writes deltas since the previous tick, plus a baseline state row per
+  disk on daemon start. Optional smartctl cross-check on transitions only.
+  Adds close_write to the inotifywait watch, recorded as event=write. Settings
+  page gains a disk spin-events view and per-disk current-state line. Still
+  moves nothing.
 ###0.2.0
 - Observation mode: unifies smbstatus -j polling and an inotifywait watcher
   over the pool-side watch dirs into an `activity` table (SQLite, under

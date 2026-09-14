@@ -173,10 +173,17 @@ on flash), created idempotently by `dormouse_open_db()`, WAL mode:
 CREATE TABLE activity (
   ts INTEGER NOT NULL, rel_path TEXT NOT NULL, share TEXT NOT NULL,
   client_ip TEXT NOT NULL, source TEXT NOT NULL, event TEXT NOT NULL,
-  count INTEGER NOT NULL DEFAULT 1
+  count INTEGER NOT NULL DEFAULT 1,
+  reads_delta INTEGER, writes_delta INTEGER  -- added 0.2.1, nullable, NULL on pre-0.2.1 rows
 );
 CREATE TABLE stats (key TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0);
 ```
+
+`reads_delta`/`writes_delta` are added by `dormouse_migrate_activity_schema()`,
+guarded by `PRAGMA table_info` so it is a no-op on an already-migrated db —
+called unconditionally from `dormouse_open_db()`, so every code path that
+opens the manifest (daemon, api endpoint, tests) upgrades a 0.2.0-shaped db
+in place the first time it's opened.
 
 One deviation from the PLAN.md §4 `activity` shape: a `count` column, needed
 because inotify `ACCESS` events are coalesced (at most one row per file per
@@ -201,6 +208,54 @@ The settings page (`Dormouse.page`) never touches the db directly — it polls
 `dormouse-api.php` (urlencoded `$.post` with `csrf_token`, per the WebGUI
 rules above) every 15s, which opens the db `SQLITE3_OPEN_READONLY` and
 returns JSON built by `dormouse_build_status()`.
+
+## Source C — disk spin-state log (0.2.1)
+
+Verified on the host, 14 Sep 2026 (do not re-derive):
+
+- Unraid writes nothing to syslog about ZFS pool disk spin-up/down. The only
+  data is `/var/local/emhttp/disks.ini` (tmpfs, maintained by `emhttpd`):
+  per-disk sections `["snowflake"]`…`["snowflake6"]` (plus `parity`, `cache`,
+  `flash`, etc.) with `device="sdX"`, `spundown="0|1"`, `numReads=`,
+  `numWrites=`. A live capture over ssh (read-only `cat`/`grep`, no write)
+  showed plain LF line endings, not CRLF — `dormouse_parse_disks_ini()`
+  tolerates a trailing `\r` anyway, cheaply, in case a future build changes
+  that.
+- **Spin state comes from `disks.ini`, never from touching the pool.** Reading
+  it is tmpfs-only and costs nothing; `stat()`-ing anything under
+  `/mnt/snowflake` on a timer is the thing this whole project exists to avoid
+  (see "Never stat pool paths on a timer" above).
+- `smartctl -n standby -i /dev/sdX` returns rc 2 when a disk is in standby and
+  rc 0 when active, without waking it. Used **only** as a cross-check on a
+  detected `disks.ini` transition (`dormouse_smartctl_standby()` /
+  `dormouse_smartctl_agrees()` in `lib.php`) — never as a regular poll.
+  Disagreements increment the `disk_state_disagreements` stats key and log a
+  warning line.
+
+`pool_disk_prefix` (config key, default `snowflake`) selects which `disks.ini`
+section names are tracked: `dormouse_pool_disk_names()` filters to names
+starting with that prefix. On the daemon's existing 15s tick (same cadence as
+the `smbstatus` poll, no separate timer), `dormouse_disk_poll_tick()` diffs
+each tracked disk's `spundown`/`numReads`/`numWrites` against the previous
+tick: unseen disk → one `event='state'` baseline row (this is how the daemon
+start baseline happens — no separate startup code path, the first tick's
+`$diskState` is simply empty); a `spundown` flip → one `event='spinup'`
+(1→0) or `'spindown'` (0→1) row carrying `reads_delta`/`writes_delta` since
+the previous tick; no change → no row. A delta that would come out negative
+(a counter reset or wrap) is recorded as `NULL`, never a huge unsigned
+number. `stats` also gets `disk_last_poll_ts` and, per disk,
+`disk_state_<name>` / `disk_state_<name>_since` (maintained every tick a row
+was written, read back by `dormouse_build_disk_states()` for the settings
+page's current-state line).
+
+`inotifywait`'s event set also gained `close_write` this release, recorded
+uncoalesced (one row per write, unlike the coalesced `access` rows) as
+`source='inotify', event='write'`.
+
+`dormouse_build_spin_events()` returns the last 30 `spinup`/`spindown` rows,
+each with the distinct non-disk activity rows in the 60s window immediately
+before and after it — shown on the settings page next to the transition so a
+spin-up can be read next to the opens that plausibly caused it.
 
 ## Movies is out of scope
 
