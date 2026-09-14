@@ -10,6 +10,28 @@ zero-padded, because Unraid's plugin manager compares versions with a plain
 
 ## [Unreleased]
 
+### Plan — Source C: disk spin-state log (0.2.1)
+
+- Parse `/var/local/emhttp/disks.ini` (tmpfs, emhttpd-maintained) on the
+  existing 15s tick in `dormoused`. New `dormouse_parse_disks_ini()` in
+  `lib.php`, tested against a sanitised fixture modelled on a live capture
+  (`tests/fixtures/disks.ini`, 2026-09-14, fake serials).
+- Track `spundown`/`numReads`/`numWrites` per disk whose section name starts
+  with `pool_disk_prefix` (new config key, default `snowflake`). On a
+  `spundown` transition, record one `activity` row (`source='disk'`,
+  `event='spinup'|'spindown'`) with `reads_delta`/`writes_delta` (new
+  nullable columns, added via an idempotent `PRAGMA table_info`-guarded
+  `ALTER TABLE`). Negative deltas (counter reset/wrap) are recorded as NULL,
+  never a huge number. Baseline `event='state'` rows on daemon start.
+- Optional smartctl cross-check on transitions only (`smartctl -n standby`,
+  never a regular poll) — logs and counts disagreements with disks.ini.
+- `close_write` added to the inotifywait event set, recorded uncoalesced as
+  `event='write'`.
+- `dormouse-api.php`/`Dormouse.page` gain a disk spin-events view: last 30
+  transitions with the activity in the surrounding ±60s window, plus a
+  per-disk current-state line.
+- Still Phase 2 — no moves; the existing no-move grep test stays green.
+
 ## [0.2.0] - 2026-09-13
 
 ### Added
