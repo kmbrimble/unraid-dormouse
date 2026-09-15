@@ -246,8 +246,9 @@ while ($running) {
     }
 
     if ($now - $lastZfsPoll >= $config['smb_poll_seconds']) {
-        // Source D — kstats only, never zpool/zfs commands (CLAUDE.md): reading
-        // /proc/spl/kstat/zfs/* and /proc/diskstats never touches the pool.
+        // Source D — kstats only, never a pool-management CLI on a timer
+        // (CLAUDE.md): reading /proc/spl/kstat/zfs/* and /proc/diskstats
+        // never touches the pool.
         $datasets = [];
         foreach (dormouse_list_objset_files($config['zfs_kstat_dir'], $config['zfs_pool_name']) as $objsetFile) {
             $raw = @file_get_contents($objsetFile);
