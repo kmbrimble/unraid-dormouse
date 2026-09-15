@@ -102,10 +102,12 @@ $config = dormouse_load_config($cfgFile);
 // real mountpoint yet — a boot-time invocation before the pools mount would
 // otherwise create manifest.db on the RAM rootfs, silently covered by the
 // later real mount and lost at shutdown (CLAUDE.md boot-order facts,
-// verified 2026-09-15). The db_path check resolves the directory that
-// would actually hold it (dormouse_mount_root_for()), rather than assuming
-// it lives under cache_root — db_path is an independently configurable
-// key. This should never actually trigger in production now that the plg
+// verified 2026-09-15). The db_path check compares the device ID of its
+// nearest existing ancestor against root's (dormouse_db_path_mounted()),
+// rather than assuming it lives under cache_root or trusting `mountpoint`
+// on an intermediate directory — /mnt itself is a bind mount of rootfs on
+// this host, so `mountpoint -q /mnt` is true even before any pool mounts.
+// This should never actually trigger in production now that the plg
 // only starts dormoused via the `started` event hook or an
 // already-array-started install, but it stays as the last line of defence.
 // getenv() returns false, not null, when unset — normalised here rather

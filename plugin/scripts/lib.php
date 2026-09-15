@@ -98,16 +98,11 @@ function dormouse_resolve_mounted(?string $override, string $dir): bool
 }
 
 /**
- * Finds the real mount root that $path would actually be written under,
- * without assuming it lives under cache_root — db_path is an independent
- * config key, and `mountpoint -q` only ever returns true for the exact
- * mount root, never a subdirectory of one, so it can't be checked directly
- * against dirname($path). Walks up to the nearest existing ancestor (the
- * target need not exist yet), then further up until a real mountpoint is
- * found. Returns '/' if nothing but the rootfs is found — the "not
- * actually mounted yet" case this guard exists to catch.
+ * Nearest existing ancestor of $path — dirname() repeatedly, since a
+ * not-yet-created db_path (the normal case, pre-first-start) has no
+ * directory of its own to stat() yet.
  */
-function dormouse_mount_root_for(string $path): string
+function dormouse_nearest_existing_ancestor(string $path): string
 {
     $dir = $path;
     while (!is_dir($dir)) {
@@ -117,33 +112,33 @@ function dormouse_mount_root_for(string $path): string
         }
         $dir = $parent;
     }
-    while ($dir !== '/' && $dir !== '.') {
-        if (dormouse_is_mountpoint($dir)) {
-            return $dir;
-        }
-        $parent = dirname($dir);
-        if ($parent === $dir) {
-            break;
-        }
-        $dir = $parent;
-    }
-    return '/';
+    return $dir;
 }
 
 /**
- * Whether $dbPath's directory is actually on a mounted filesystem (not
- * merely the rootfs), honouring the same env-override convention as
- * dormouse_resolve_mounted(). Deliberately not routed through
- * dormouse_resolve_mounted() itself: dormouse_mount_root_for() returning
- * '/' means "nothing else mounted", and re-checking `mountpoint -q /` would
- * wrongly report that as mounted (the root filesystem is always mounted).
+ * Whether $dbPath's directory is actually on a mounted filesystem, not
+ * merely the rootfs — honouring the same env-override convention as
+ * dormouse_resolve_mounted(). Deliberately does NOT walk up looking for the
+ * nearest directory `mountpoint -q` accepts: on this host /mnt is itself a
+ * bind mount of rootfs (`findmnt /mnt` -> `rootfs[/mnt] rootfs`, confirmed
+ * 2026-09-15), so `mountpoint -q /mnt` returns true even before any pool is
+ * mounted — walking up to it would have made this guard fail open on the
+ * exact boot-time case it exists to catch. Comparing device IDs instead:
+ * a real mount (btrfs cache, ZFS pool) always has a different st_dev than
+ * root; a bind of rootfs shares root's st_dev.
  */
 function dormouse_db_path_mounted(?string $override, string $dbPath): bool
 {
     if ($override !== null) {
         return $override === '1';
     }
-    return dormouse_mount_root_for(dirname($dbPath)) !== '/';
+    $dir = dormouse_nearest_existing_ancestor(dirname($dbPath));
+    $dirStat = @stat($dir);
+    $rootStat = @stat('/');
+    if ($dirStat === false || $rootStat === false) {
+        return false;
+    }
+    return $dirStat['dev'] !== $rootStat['dev'];
 }
 
 // --- Manifest db -------------------------------------------------------------

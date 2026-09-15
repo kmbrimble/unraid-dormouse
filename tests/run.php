@@ -409,18 +409,18 @@ t('the if-CMD-then/else pattern used for array-ready.sh survives set -e when CMD
     assert_eq(['reached', '1'], $out);
 });
 
-t('dormouse_mount_root_for walks up to the nearest real mountpoint, defaulting to / when nothing else is mounted', function () {
-    assert_eq('/', dormouse_mount_root_for('/nonexistent/deeply/nested/path/manifest.db'));
-    assert_eq('/', dormouse_mount_root_for('/'));
+t('dormouse_nearest_existing_ancestor walks up to the nearest existing directory, defaulting to / when nothing exists', function () {
+    assert_eq('/', dormouse_nearest_existing_ancestor('/nonexistent/deeply/nested/path/manifest.db'));
+    assert_eq('/', dormouse_nearest_existing_ancestor('/'));
 });
 
-t('dormouse_mount_root_for works for a target that does not exist yet, by walking up to an existing ancestor first', function () {
+t('dormouse_nearest_existing_ancestor works for a target that does not exist yet, without creating anything', function () {
     $tmp = sys_get_temp_dir() . '/dormouse-mountroot-' . uniqid();
     // Neither $tmp nor its subdirs exist — dormouse_open_db() would mkdir
     // them, which is exactly what the guard must check before that happens.
-    $root = dormouse_mount_root_for($tmp . '/appdata/dormouse/manifest.db');
-    assert_true($root !== '', 'must resolve to some ancestor rather than erroring');
-    assert_true(!is_dir($tmp), 'must never create the directory while merely resolving its mount root');
+    $ancestor = dormouse_nearest_existing_ancestor($tmp . '/appdata/dormouse/manifest.db');
+    assert_true($ancestor !== '', 'must resolve to some ancestor rather than erroring');
+    assert_true(!is_dir($tmp), 'must never create the directory while merely resolving its ancestor');
 });
 
 t('dormouse_db_path_mounted: real check reports false when db_path resolves only to the rootfs', function () {
@@ -430,6 +430,28 @@ t('dormouse_db_path_mounted: real check reports false when db_path resolves only
 t('dormouse_db_path_mounted: override "1"/"0" bypasses the real check in both directions', function () {
     assert_true(dormouse_db_path_mounted('1', '/nonexistent/deeply/nested/path/manifest.db'));
     assert_true(!dormouse_db_path_mounted('0', '/'));
+});
+
+t('dormouse_db_path_mounted is not fooled by an intermediate directory that is merely a bind-mount of rootfs (the live host\'s /mnt shape: findmnt /mnt -> rootfs[/mnt] rootfs, confirmed 2026-09-15)', function () {
+    $tmp = sys_get_temp_dir() . '/dormouse-bindmount-' . uniqid();
+    mkdir($tmp);
+    $bindTarget = "$tmp/mnt";
+    mkdir($bindTarget);
+    exec('mount --bind ' . escapeshellarg($tmp) . ' ' . escapeshellarg($bindTarget) . ' 2>&1', $out, $rc);
+    if ($rc !== 0) {
+        // No CAP_SYS_ADMIN in this environment — can't reproduce a real
+        // bind mount, but the device-comparison logic is still exercised
+        // by the other dormouse_db_path_mounted tests above.
+        exec('rm -rf ' . escapeshellarg($tmp));
+        return;
+    }
+    // $bindTarget is a real, distinct mount entry — `mountpoint -q` would
+    // say yes — but shares rootfs's device, exactly like /mnt on the host
+    // before the cache pool actually mounts under it.
+    $dbPath = "$bindTarget/cache/appdata/dormouse/manifest.db"; // cache/ deliberately never created
+    assert_true(!dormouse_db_path_mounted(null, $dbPath), 'a bind mount of rootfs must not be treated as a real mount for db_path');
+    exec('umount ' . escapeshellarg($bindTarget));
+    exec('rm -rf ' . escapeshellarg($tmp));
 });
 
 t("dormoused's mount guard resolves db_path's real mount root, not merely cache_root, so a db_path outside cache_root can't bypass it", function () use ($repoRoot) {
