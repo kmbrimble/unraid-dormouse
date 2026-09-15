@@ -10,33 +10,60 @@ zero-padded, because Unraid's plugin manager compares versions with a plain
 
 ## [Unreleased]
 
-### Plan — 0.2.3: boot-order fix
+## [0.2.3] - 2026-09-16
 
-Bug fix within Phase 2 (observation mode only; no tiering logic added).
-Verified on the live host 2026-09-15: plugins install before the cache/pool
-mounts at boot, so 0.1.0-0.2.2's unconditional `rc.dormouse start` in the
-`.plg` install step can create `manifest.db` on the RAM rootfs, silently
-covered by the later cache mount and lost at shutdown; `dormoused` also
-holds `manifest.db`/-wal/-shm open on `/mnt/cache` with no event hooks to
-release them before an array stop.
+### Fixed
+
+Boot-order bug within Phase 2 (observation mode only; no tiering logic
+added — the moves-impossible grep test stays green). Verified on the live
+host 2026-09-15: plugins install before the cache/pool mounts at boot, so
+0.1.0-0.2.2's unconditional daemon start in the `.plg` install step could
+create `manifest.db` on the RAM rootfs, silently covered by the later cache
+mount and lost at shutdown; `dormoused` also held `manifest.db`/-wal/-shm
+open on `/mnt/cache` with no event hooks to release them before an array
+stop. Never actually fired (Dormouse hadn't been through a boot since
+install), but would have on the next reboot.
 
 - `plugin/event/started` / `plugin/event/stopping_svcs` (new, executable —
-  emhttpd gates these on `-x`, a documented exception to CLAUDE.md rule 4)
-  hook the real emhttpd lifecycle instead of relying on install-time
-  ordering, matching Godwit's 0.1.1 fix for the identical bug.
+  emhttpd gates these on `-x`, a documented exception to CLAUDE.md rule 4,
+  confirmed live via `/usr/local/sbin/emhttp_event` and the identical hooks
+  shipped by `file.activity`/`unbalanced`/`tips.and.tweaks`) hook the real
+  emhttpd lifecycle instead of relying on install-time ordering, matching
+  Godwit's 0.1.1 fix for the identical bug (which has the same `set -e`
+  hazard described below, unfixed there — out of scope here, Godwit is
+  reference-only).
 - `plugin/scripts/array-ready.sh` (new): the install step starts the daemon
   only when the array is already `STARTED` and both `cache_root` and
-  `pool_root` are real mountpoints; otherwise it defers to the `started`
-  event hook.
-- `dormoused` refuses to start (before any mkdir) unless the mounts holding
-  `db_path` and `pool_root` are real mountpoints, with env overrides for
-  tests.
+  `pool_root` (read from `dormouse.cfg`, never hardcoded) are real
+  mountpoints; otherwise it defers to the `started` event hook. Its result
+  is consumed via `if bash array-ready.sh; then READY=0; else READY=1; fi`
+  — a bare statement would have its non-zero exit (the expected, common
+  case) abort the whole install script under the block's `set -e`, exactly
+  on the boot-time case this release exists to handle. Caught by the review
+  pipeline (2/3 then 4/5 agreement), fixed before merge.
+- `dormoused` refuses to start (before any mkdir) unless `pool_root` is a
+  real mountpoint and the directory that would actually hold `db_path` is
+  on a mounted filesystem — checked by comparing device IDs
+  (`dormouse_db_path_mounted()`/`dormouse_nearest_existing_ancestor()`)
+  rather than assuming `db_path` lives under `cache_root`, and rather than
+  walking up to the nearest directory `mountpoint -q` accepts: `/mnt` on
+  this host is itself a bind mount of rootfs (`findmnt /mnt` ->
+  `rootfs[/mnt] rootfs`), so `mountpoint -q /mnt` is true even before any
+  pool mounts — that walk would have made the guard fail open on exactly
+  the boot-time case it exists to catch. Caught by `advisor` after the
+  first review round; verified against a live host read
+  (`stat -c '%n dev=%d' / /mnt /mnt/cache /mnt/snowflake`) and reproduced in
+  a test with a real `mount --bind`. Env overrides for tests handle an
+  explicit `"0"` correctly (the `getenv() ?: null` pitfall).
 - `rc.dormouse stop` escalates to SIGKILL for `dormoused` and its
   `inotifywait` child if the graceful wait times out, and only removes the
   pidfile once death is confirmed.
-- Tests: array-ready states, mount-guard override in both directions
-  (including `"0"`), SIGKILL escalation, event scripts packaged with
+- Tests (98 total): array-ready states, mount-guard override in both
+  directions (including `"0"`), the bind-mount-of-rootfs edge case, the
+  `set -e` regression, SIGKILL escalation, event scripts packaged with
   shebang + executable bit, `dormouse.plg` XML well-formedness.
+- Untracked `.scratch/` (pre-existing local scratch content that had been
+  accidentally swept into a checkpoint commit by `git add -A`).
 
 ## [0.2.2] - 2026-09-15
 

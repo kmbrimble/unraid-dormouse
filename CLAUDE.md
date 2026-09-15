@@ -31,10 +31,86 @@ Hard-won from SecretsMan and NetMan. Not optional, not footnotes.
    block invokes must have a shebang and be gated on `[[ -f script ]]`, never
    `[[ -x script ]]` — SecretsMan's uninstall once silently never ran because its
    script had no shebang and was gated on `-x`.
+   **Documented exception:** `plugin/event/started` and
+   `plugin/event/stopping_svcs` (0.2.3) — emhttpd's own `emhttp_event`
+   dispatcher (`/usr/local/sbin/emhttp_event` on the host, read live
+   2026-09-15) gates `event/*` scripts on `[ -x $Dir/event/$1 ]` itself, not
+   `-f`. This is emhttpd's dispatch convention, not this repo's `.plg`
+   invoking a script directly, so rule 4 doesn't apply to these two files —
+   they are packaged executable on purpose, verified in
+   `scripts/build-plugin.sh` and `tests/run.php`. `file.activity`,
+   `unbalanced` and `tips.and.tweaks` all use the identical `started`/
+   `stopping_svcs` event names for their own daemons (confirmed by reading
+   their installed `event/` directories live).
 5. **`upgradepkg` may leave both versions in `/var/log/packages/`.** Cosmetic
    (tmpfs, rebuilt at boot), not a bug.
 6. **`gh release list` is not evidence about what is on the host.** Read
    `/boot/config/plugins/dormouse.plg` on the host itself.
+7. **Plugins install before the array's pools mount at boot — never start
+   the daemon unconditionally from the `.plg` install step.** Verified live
+   2026-09-15: `/boot/logs/syslog` for the 12 Sep boot shows
+   `rc.local: plugin: installing: …` from 11:20:38-11:22:00, and
+   `emhttpd: mounting /mnt/cache` only at 11:22:14 — plugins install first,
+   pools mount after. `findmnt /mnt` → `rootfs[/mnt] rootfs`: `/mnt` itself
+   is a bind mount of rootfs (same `st_dev` as `/`, confirmed via
+   `stat -c '%n dev=%d' / /mnt /mnt/cache /mnt/snowflake` on the host,
+   2026-09-15 — `/`=2, `/mnt`=2, `/mnt/cache`=44, `/mnt/snowflake`=45), so
+   `mountpoint -q /mnt` is true even before any pool is mounted. A guard
+   that walks up an unmounted target's path looking for the nearest
+   directory `mountpoint -q` accepts will stop at `/mnt` and wrongly report
+   "mounted" — compare device IDs against root instead (see
+   `dormouse_db_path_mounted()` in `lib.php`), never `mountpoint -q` on an
+   intermediate ancestor. The install step, the daemon itself, and the
+   emhttpd `started`/`stopping_svcs` event hooks together are what make
+   0.2.3 safe — see "Boot order and lifecycle" below.
+
+### Boot order and lifecycle (0.2.3)
+
+- `plugin/event/started` runs `rc.dormouse start`; `plugin/event/stopping_svcs`
+  runs `rc.dormouse stop`. These are emhttpd's real lifecycle signals — see
+  rule 4's documented `-x` exception above.
+- `plugin/scripts/array-ready.sh`: the `.plg` install step starts the daemon
+  immediately only if `/var/local/emhttp/var.ini` already has
+  `mdState="STARTED"` **and** both `cache_root` and `pool_root` (read from
+  `dormouse.cfg`, never hardcoded) are real mountpoints. Otherwise it prints
+  that the daemon will start via the `started` hook. Its exit code is
+  consumed as `if bash array-ready.sh; then READY=0; else READY=1; fi` —
+  **never** as a bare statement followed by `READY=$?`, because the install
+  block runs under `set -e` and a bare statement's non-zero exit (the
+  expected outcome on a boot-time install) would abort the whole install
+  script before it reaches the "defer to the started hook" branch. Caught
+  by the review pipeline while building 0.2.3 (agreement 2/3, then 4/5 after
+  more passes) — verify this shape survives any future edit to the install
+  block.
+- `dormoused` itself refuses to start (before any `mkdir`) unless
+  `pool_root` is a real mountpoint and the directory that would actually
+  hold `db_path` is on a mounted filesystem — the latter via device-ID
+  comparison against root (`dormouse_db_path_mounted()` /
+  `dormouse_nearest_existing_ancestor()` in `lib.php`), not `mountpoint -q`
+  on an assumed `cache_root` ancestor, per rule 7 above. `DORMOUSE_ASSUME_CACHE_MOUNTED`
+  / `DORMOUSE_ASSUME_POOL_MOUNTED` env overrides exist for tests; both
+  handle an explicit `"0"` correctly (`getenv() ?: null` would silently
+  treat `"0"` as unset).
+- `rc.dormouse stop` waits `DORMOUSE_STOP_WAIT_ITERATIONS` (20 × 0.5s = 10s
+  in production) for a graceful exit, then escalates to `SIGKILL` for both
+  `dormoused` and its `inotifywait` child (matched via a path-specific,
+  self-match-safe `pkill -f` pattern — bracket one character per the
+  pgrep/pgrep-self-match note in the "Dev-environment fact" section below),
+  and only removes the pidfile once death of both is confirmed.
+- **Whether inotify watches alone block a ZFS unmount:** no. Checked live
+  2026-09-16: the running `inotifywait` child's only meaningful open fd is
+  `anon_inode:inotify` (a kernel-internal notification queue) — it holds no
+  fd under `/mnt/cache` or `/mnt/snowflake`. Per `inotify(7)`, an unmount of
+  a watched filesystem delivers `IN_UNMOUNT` and the kernel drops the watch
+  rather than blocking the unmount. The confirmed blocker remains the open
+  SQLite handle (`manifest.db`/-wal/-shm) on `/mnt/cache`, which is exactly
+  what the `stopping_svcs` hook exists to release before the array unmounts
+  disks.
+- **Not yet verified:** behaviour across a real reboot (this project's dev
+  container cannot reboot the host — see "Dev-environment fact" below).
+  Everything above was verified by hand-running the event scripts and by
+  reading live host state; a real boot-time install has not been observed
+  end-to-end.
 
 ### WebGUI rules
 
@@ -153,6 +229,9 @@ plugin/                         installed tree (unpacked to /usr/local/emhttp/pl
   scripts/lib.php                config/db/smb/inotify helpers, shared by dormoused, the api
                                   endpoint and tests/run.php
   scripts/dormouse-api.php        read-only JSON status endpoint for Dormouse.page
+  scripts/array-ready.sh          install-time gate: array STARTED + cache/pool mounted (0.2.3)
+  event/started                   emhttpd hook -> rc.dormouse start (0.2.3, packaged executable)
+  event/stopping_svcs             emhttpd hook -> rc.dormouse stop (0.2.3, packaged executable)
 scripts/
   build-plugin.sh <version>     builds dist/dormouse-<version>.txz
   install-on-host.sh            installs/upgrades on the live host over ssh, verifies
