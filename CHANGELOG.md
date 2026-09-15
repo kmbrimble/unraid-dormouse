@@ -10,6 +10,34 @@ zero-padded, because Unraid's plugin manager compares versions with a plain
 
 ## [Unreleased]
 
+### Plan — 0.2.3: boot-order fix
+
+Bug fix within Phase 2 (observation mode only; no tiering logic added).
+Verified on the live host 2026-09-15: plugins install before the cache/pool
+mounts at boot, so 0.1.0-0.2.2's unconditional `rc.dormouse start` in the
+`.plg` install step can create `manifest.db` on the RAM rootfs, silently
+covered by the later cache mount and lost at shutdown; `dormoused` also
+holds `manifest.db`/-wal/-shm open on `/mnt/cache` with no event hooks to
+release them before an array stop.
+
+- `plugin/event/started` / `plugin/event/stopping_svcs` (new, executable —
+  emhttpd gates these on `-x`, a documented exception to CLAUDE.md rule 4)
+  hook the real emhttpd lifecycle instead of relying on install-time
+  ordering, matching Godwit's 0.1.1 fix for the identical bug.
+- `plugin/scripts/array-ready.sh` (new): the install step starts the daemon
+  only when the array is already `STARTED` and both `cache_root` and
+  `pool_root` are real mountpoints; otherwise it defers to the `started`
+  event hook.
+- `dormoused` refuses to start (before any mkdir) unless the mounts holding
+  `db_path` and `pool_root` are real mountpoints, with env overrides for
+  tests.
+- `rc.dormouse stop` escalates to SIGKILL for `dormoused` and its
+  `inotifywait` child if the graceful wait times out, and only removes the
+  pidfile once death is confirmed.
+- Tests: array-ready states, mount-guard override in both directions
+  (including `"0"`), SIGKILL escalation, event scripts packaged with
+  shebang + executable bit, `dormouse.plg` XML well-formedness.
+
 ## [0.2.2] - 2026-09-15
 
 ### Added

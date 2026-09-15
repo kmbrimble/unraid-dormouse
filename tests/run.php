@@ -119,6 +119,9 @@ t('every script has a shebang', function () use ($repoRoot) {
     $scripts = [
         $repoRoot . '/plugin/scripts/rc.dormouse',
         $repoRoot . '/plugin/scripts/dormoused',
+        $repoRoot . '/plugin/scripts/array-ready.sh',
+        $repoRoot . '/plugin/event/started',
+        $repoRoot . '/plugin/event/stopping_svcs',
         $repoRoot . '/scripts/build-plugin.sh',
         $repoRoot . '/scripts/install-on-host.sh',
         $repoRoot . '/scripts/uninstall-on-host.sh',
@@ -126,6 +129,13 @@ t('every script has a shebang', function () use ($repoRoot) {
     foreach ($scripts as $script) {
         $first = fgets(fopen($script, 'r'));
         assert_true(str_starts_with($first, '#!'), "$script has no shebang");
+    }
+});
+
+t('event scripts are executable in the repo — emhttpd gates event/* on -x, not -f (documented CLAUDE.md exception)', function () use ($repoRoot) {
+    foreach (['started', 'stopping_svcs'] as $name) {
+        $path = $repoRoot . "/plugin/event/$name";
+        assert_true(is_executable($path), "$path must be executable");
     }
 });
 
@@ -155,8 +165,20 @@ t('build-plugin.sh produces a txz with the expected layout and executable bits',
         assert_true(str_contains($blob, $path), "txz missing $path");
     }
 
+    foreach ([
+        'usr/local/emhttp/plugins/dormouse/event/started',
+        'usr/local/emhttp/plugins/dormouse/event/stopping_svcs',
+        'usr/local/emhttp/plugins/dormouse/scripts/array-ready.sh',
+    ] as $path) {
+        assert_true(str_contains($blob, $path), "txz missing $path");
+    }
+
     foreach ($listing as $line) {
-        if (str_contains($line, 'scripts/rc.dormouse') || str_contains($line, 'scripts/dormoused')) {
+        if (str_contains($line, 'scripts/rc.dormouse')
+            || str_contains($line, 'scripts/dormoused')
+            || str_contains($line, 'event/started')
+            || str_contains($line, 'event/stopping_svcs')
+        ) {
             assert_true((bool) preg_match('/^-rwx/', $line), "not executable in txz: $line");
         }
     }
@@ -176,7 +198,7 @@ t('rc.dormouse start/status/stop works against a temp pid/log path', function ()
     file_put_contents($cfgFile, "pool_root=$tmpDir/pool\ncache_root=$tmpDir/cache\ndb_path=$tmpDir/manifest.db\nwatched_shares=Test\n");
     $rc = $repoRoot . '/plugin/scripts/rc.dormouse';
     $env = sprintf(
-        'DORMOUSE_PIDFILE=%s DORMOUSE_LOG=%s DORMOUSE_CFG=%s DORMOUSE_RUNDIR=%s',
+        'DORMOUSE_PIDFILE=%s DORMOUSE_LOG=%s DORMOUSE_CFG=%s DORMOUSE_RUNDIR=%s DORMOUSE_ASSUME_CACHE_MOUNTED=1 DORMOUSE_ASSUME_POOL_MOUNTED=1',
         escapeshellarg($pidFile),
         escapeshellarg($logFile),
         escapeshellarg($cfgFile),
@@ -253,6 +275,189 @@ t('dormouse.plg only rewrites the cfg when no real key=value line is present', f
         'install block must detect a placeholder cfg (no key=value lines) before overwriting it'
     );
     assert_true(str_contains($plgRaw, 'watched_shares=Content,Kieren,Teegan,Downloads,Filing Cabinet,Photos'));
+});
+
+// --- 0.2.3: boot-order fix — mount guards -----------------------------------
+
+t('dormouse_resolve_mounted: override "1" reports mounted regardless of the real filesystem', function () {
+    assert_true(dormouse_resolve_mounted('1', '/nonexistent/definitely/not/a/mountpoint'));
+});
+
+t('dormouse_resolve_mounted: override "0" reports NOT mounted even for a real mountpoint (the getenv() ?: null pitfall)', function () {
+    assert_true(!dormouse_resolve_mounted('0', '/'));
+});
+
+t('dormouse_resolve_mounted: no override falls through to a real mountpoint() check', function () {
+    assert_true(dormouse_resolve_mounted(null, '/'), '/ should always be a real mountpoint');
+    assert_true(!dormouse_resolve_mounted(null, '/nonexistent/definitely/not/a/mountpoint'));
+});
+
+t('dormoused refuses to start when cache_root is not mounted, and never mkdirs under it', function () use ($repoRoot) {
+    $tmpDir = sys_get_temp_dir() . '/dormouse-mountguard-' . uniqid();
+    mkdir($tmpDir);
+    $pidFile = "$tmpDir/dormouse.pid";
+    $logFile = "$tmpDir/dormouse.log";
+    $cfgFile = "$tmpDir/dormouse.cfg";
+    $cacheRoot = "$tmpDir/cache"; // deliberately never created
+    $poolRoot = "$tmpDir/pool";
+    mkdir($poolRoot);
+    file_put_contents($cfgFile, "cache_root=$cacheRoot\npool_root=$poolRoot\ndb_path=$cacheRoot/appdata/dormouse/manifest.db\nwatched_shares=Test\n");
+    $env = sprintf(
+        'DORMOUSE_PIDFILE=%s DORMOUSE_LOG=%s DORMOUSE_CFG=%s DORMOUSE_ASSUME_CACHE_MOUNTED=0 DORMOUSE_ASSUME_POOL_MOUNTED=1',
+        escapeshellarg($pidFile),
+        escapeshellarg($logFile),
+        escapeshellarg($cfgFile)
+    );
+    exec("$env php " . escapeshellarg($repoRoot . '/plugin/scripts/dormoused') . ' 2>&1', $out, $exit);
+    assert_true($exit !== 0, 'dormoused should exit non-zero when cache_root is not mounted');
+    assert_true(!file_exists($pidFile), 'pidfile must not be created when refusing to start');
+    assert_true(!is_dir($cacheRoot), 'must never mkdir the unmounted cache_root path');
+    exec('rm -rf ' . escapeshellarg($tmpDir));
+});
+
+t('dormoused refuses to start when pool_root is not mounted', function () use ($repoRoot) {
+    $tmpDir = sys_get_temp_dir() . '/dormouse-mountguard-' . uniqid();
+    mkdir($tmpDir);
+    $pidFile = "$tmpDir/dormouse.pid";
+    $logFile = "$tmpDir/dormouse.log";
+    $cfgFile = "$tmpDir/dormouse.cfg";
+    $cacheRoot = "$tmpDir/cache";
+    mkdir($cacheRoot);
+    $poolRoot = "$tmpDir/pool"; // deliberately never created
+    file_put_contents($cfgFile, "cache_root=$cacheRoot\npool_root=$poolRoot\ndb_path=$cacheRoot/appdata/dormouse/manifest.db\nwatched_shares=Test\n");
+    $env = sprintf(
+        'DORMOUSE_PIDFILE=%s DORMOUSE_LOG=%s DORMOUSE_CFG=%s DORMOUSE_ASSUME_CACHE_MOUNTED=1 DORMOUSE_ASSUME_POOL_MOUNTED=0',
+        escapeshellarg($pidFile),
+        escapeshellarg($logFile),
+        escapeshellarg($cfgFile)
+    );
+    exec("$env php " . escapeshellarg($repoRoot . '/plugin/scripts/dormoused') . ' 2>&1', $out, $exit);
+    assert_true($exit !== 0, 'dormoused should exit non-zero when pool_root is not mounted');
+    assert_true(!file_exists($pidFile), 'pidfile must not be created when refusing to start');
+    exec('rm -rf ' . escapeshellarg($tmpDir));
+});
+
+// --- 0.2.3: array-ready.sh ----------------------------------------------------
+
+function dormouse_run_array_ready(string $repoRoot, string $varIni, string $cfg, ?string $cacheMounted, ?string $poolMounted): int
+{
+    $script = $repoRoot . '/plugin/scripts/array-ready.sh';
+    $env = 'DORMOUSE_VARINI=' . escapeshellarg($varIni) . ' DORMOUSE_CFG=' . escapeshellarg($cfg);
+    if ($cacheMounted !== null) {
+        $env .= ' DORMOUSE_TEST_CACHE_MOUNTED=' . escapeshellarg($cacheMounted);
+    }
+    if ($poolMounted !== null) {
+        $env .= ' DORMOUSE_TEST_POOL_MOUNTED=' . escapeshellarg($poolMounted);
+    }
+    exec("$env bash " . escapeshellarg($script), $out, $exit);
+    return $exit;
+}
+
+function dormouse_array_ready_fixture(string $mdState): array
+{
+    $tmp = sys_get_temp_dir() . '/dormouse-ar-' . uniqid();
+    mkdir($tmp);
+    $varIni = "$tmp/var.ini";
+    file_put_contents($varIni, "mdState=\"$mdState\"\n");
+    $cfg = "$tmp/dormouse.cfg";
+    file_put_contents($cfg, "cache_root=$tmp/cache\npool_root=$tmp/pool\n");
+    return [$tmp, $varIni, $cfg];
+}
+
+t('array-ready: STARTED + both mounted => ready (exit 0)', function () use ($repoRoot) {
+    [$tmp, $varIni, $cfg] = dormouse_array_ready_fixture('STARTED');
+    assert_eq(0, dormouse_run_array_ready($repoRoot, $varIni, $cfg, '1', '1'));
+    exec('rm -rf ' . escapeshellarg($tmp));
+});
+
+t('array-ready: STOPPED array => not ready even if both mounted', function () use ($repoRoot) {
+    [$tmp, $varIni, $cfg] = dormouse_array_ready_fixture('STOPPED');
+    assert_true(dormouse_run_array_ready($repoRoot, $varIni, $cfg, '1', '1') !== 0);
+    exec('rm -rf ' . escapeshellarg($tmp));
+});
+
+t('array-ready: STARTED but cache_root not mounted => not ready', function () use ($repoRoot) {
+    [$tmp, $varIni, $cfg] = dormouse_array_ready_fixture('STARTED');
+    assert_true(dormouse_run_array_ready($repoRoot, $varIni, $cfg, '0', '1') !== 0);
+    exec('rm -rf ' . escapeshellarg($tmp));
+});
+
+t('array-ready: STARTED but pool_root not mounted => not ready', function () use ($repoRoot) {
+    [$tmp, $varIni, $cfg] = dormouse_array_ready_fixture('STARTED');
+    assert_true(dormouse_run_array_ready($repoRoot, $varIni, $cfg, '1', '0') !== 0);
+    exec('rm -rf ' . escapeshellarg($tmp));
+});
+
+t('array-ready.sh derives cache_root/pool_root from dormouse.cfg, not a hardcoded /mnt path', function () use ($repoRoot) {
+    $src = file_get_contents($repoRoot . '/plugin/scripts/array-ready.sh');
+    assert_true(str_contains($src, 'cache_root'), 'array-ready.sh must read cache_root from cfg');
+    assert_true(str_contains($src, 'pool_root'), 'array-ready.sh must read pool_root from cfg');
+});
+
+t('dormouse.plg install block consults array-ready.sh before starting the daemon', function () use ($plgRaw) {
+    assert_true(str_contains($plgRaw, 'array-ready.sh'), 'install block must consult array-ready.sh');
+    $readyPos = strpos($plgRaw, 'array-ready.sh');
+    $startPos = strpos($plgRaw, 'rc.dormouse start');
+    assert_true($readyPos !== false && $startPos !== false && $readyPos < $startPos, 'array-ready.sh must be checked before rc.dormouse start');
+});
+
+// --- 0.2.3: rc.dormouse stop — SIGKILL escalation and child cleanup ----------
+
+t('rc.dormouse stop escalates to SIGKILL when the daemon ignores SIGTERM, and only removes the pidfile once death is confirmed', function () use ($repoRoot) {
+    $tmpDir = sys_get_temp_dir() . '/dormouse-sigkill-' . uniqid();
+    mkdir($tmpDir);
+    $pidFile = "$tmpDir/dormouse.pid";
+    $logFile = "$tmpDir/dormouse.log";
+    $runDir = "$tmpDir/run";
+    mkdir($runDir);
+
+    // Stands in for a hung dormoused: traps and ignores SIGTERM. Exercises
+    // rc.dormouse's own escalation path, independent of dormoused's
+    // (already-correct) SIGTERM handler.
+    exec("bash -c 'trap \"\" TERM; while :; do sleep 1; done' >/dev/null 2>&1 & echo \$!", $pidOut);
+    $hungPid = (int) trim($pidOut[0]);
+    file_put_contents($pidFile, $hungPid . PHP_EOL);
+
+    $rc = $repoRoot . '/plugin/scripts/rc.dormouse';
+    $env = sprintf(
+        'DORMOUSE_PIDFILE=%s DORMOUSE_LOG=%s DORMOUSE_RUNDIR=%s DORMOUSE_STOP_WAIT_ITERATIONS=2',
+        escapeshellarg($pidFile),
+        escapeshellarg($logFile),
+        escapeshellarg($runDir)
+    );
+    exec("$env bash $rc stop 2>&1", $out, $exit);
+    assert_eq(0, $exit, "stop should succeed once it escalates to SIGKILL:\n" . implode("\n", $out));
+    assert_true(str_contains(implode("\n", $out), 'SIGKILL'), 'stop should report escalating to SIGKILL');
+    usleep(300000);
+    assert_true(posix_getpgid($hungPid) === false, 'the hung process must actually be dead after stop');
+    assert_true(!file_exists($pidFile), 'pidfile should be removed once death is confirmed');
+
+    exec('rm -rf ' . escapeshellarg($tmpDir));
+});
+
+t('rc.dormouse stop kills a matching inotifywait child even when dormoused itself is not running', function () use ($repoRoot) {
+    $tmpDir = sys_get_temp_dir() . '/dormouse-killchild-' . uniqid();
+    mkdir($tmpDir);
+    $pidFile = "$tmpDir/dormouse.pid"; // deliberately absent — dormoused not running
+    $logFile = "$tmpDir/dormouse.log";
+    $runDir = "$tmpDir/run";
+    mkdir($runDir);
+
+    // Fake child whose cmdline matches production's real inotifywait
+    // invocation shape (--fromfile $runDir/watch.list).
+    $fakeCmdline = "inotifywait -m --fromfile $runDir/watch.list";
+    exec("bash -c 'while :; do sleep 1; done' " . escapeshellarg($fakeCmdline) . " >/dev/null 2>&1 & echo \$!", $pidOut);
+    $childPid = (int) trim($pidOut[0]);
+    usleep(200000);
+
+    $rc = $repoRoot . '/plugin/scripts/rc.dormouse';
+    $env = sprintf('DORMOUSE_PIDFILE=%s DORMOUSE_LOG=%s DORMOUSE_RUNDIR=%s', escapeshellarg($pidFile), escapeshellarg($logFile), escapeshellarg($runDir));
+    exec("$env bash $rc stop 2>&1", $out, $exit);
+    assert_eq(0, $exit, 'stop should succeed: ' . implode("\n", $out));
+    usleep(300000);
+    assert_true(posix_getpgid($childPid) === false, 'the fake inotifywait child must be killed');
+
+    exec('rm -rf ' . escapeshellarg($tmpDir));
 });
 
 // --- Phase 2: manifest db -------------------------------------------------------
