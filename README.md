@@ -12,11 +12,12 @@ Machine backups, or anything else regularly read off slow storage, not just
 Plex libraries.
 
 **Status: Phase 2 — observation only.** The daemon polls `smbstatus -j`,
-watches pool-side directories with `inotifywait` (including file writes), and
-tracks per-disk spin state from `disks.ini`, recording all three into a
-SQLite activity log shown live on the settings page. It moves nothing —
-no move/copy/delete code exists anywhere in the shipped plugin tree, and a
-test enforces that.
+watches pool-side directories with `inotifywait` (including file writes),
+tracks per-disk spin state from `disks.ini`, and attributes ZFS-level I/O
+per dataset and per device from the kernel's own kstat counters — recording
+all four into a SQLite activity log shown live on the settings page. It
+moves nothing — no move/copy/delete code exists anywhere in the shipped
+plugin tree, and a test enforces that.
 
 ## Relationship with PlexCache-D
 

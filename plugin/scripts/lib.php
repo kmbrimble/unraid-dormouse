@@ -20,6 +20,8 @@ function dormouse_default_config(): array
         'activity_retain_days' => 30,
         'db_path' => '/mnt/cache/appdata/dormouse/manifest.db',
         'pool_disk_prefix' => 'snowflake',
+        'zfs_pool_name' => 'snowflake',
+        'zfs_kstat_dir' => '/proc/spl/kstat/zfs',
     ];
 }
 
@@ -92,6 +94,17 @@ function dormouse_open_db(string $dbPath): SQLite3
         key TEXT PRIMARY KEY,
         value INTEGER NOT NULL DEFAULT 0
     )');
+    $db->exec('CREATE TABLE IF NOT EXISTS zfs_io (
+        ts INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        name TEXT NOT NULL,
+        reads INTEGER,
+        nread INTEGER,
+        writes INTEGER,
+        nwritten INTEGER,
+        unlinks INTEGER
+    )');
+    $db->exec('CREATE INDEX IF NOT EXISTS idx_zfs_io_ts ON zfs_io(ts)');
     dormouse_migrate_activity_schema($db);
     return $db;
 }
@@ -246,6 +259,8 @@ function dormouse_build_status(SQLite3 $db, array $config, string $pidFile): arr
         'disk_state_disagreements' => dormouse_stat_get($db, 'disk_state_disagreements'),
         'disk_states' => dormouse_build_disk_states($db),
         'spin_events' => dormouse_build_spin_events($db),
+        'zfs_last_poll_ts' => dormouse_stat_get($db, 'zfs_last_poll_ts'),
+        'zfs_24h' => dormouse_zfs_24h($db),
     ];
 }
 
@@ -661,6 +676,7 @@ function dormouse_build_spin_events(SQLite3 $db, int $limit = 30): array
             'writes_delta' => $row['writes_delta'] !== null ? (int) $row['writes_delta'] : null,
             'before' => dormouse_activity_window($db, $ts - 60, $ts),
             'after' => dormouse_activity_window($db, $ts, $ts + 60),
+            'zfs_window' => dormouse_zfs_window($db, $ts - 60, $ts + 60),
         ];
     }
     return $events;
@@ -689,6 +705,252 @@ function dormouse_build_disk_states(SQLite3 $db): array
         $out[$name] = [
             'spundown' => (bool) dormouse_stat_get($db, "disk_state_{$name}"),
             'since' => $since ?: null,
+        ];
+    }
+    return $out;
+}
+
+// --- Source D: ZFS kstats + diskstats ------------------------------------------
+
+/**
+ * Parses one /proc/spl/kstat/zfs/<pool>/objset-0x* file: a numeric header
+ * line, a "name type data" column-header line, then "key type value" rows
+ * (value = remainder of the line, so a dataset name containing a space, e.g.
+ * "snowflake/Filing Cabinet", survives intact). Only the fields Source D
+ * uses are kept; zil_* and anything else are ignored by construction.
+ * Returns null if no dataset_name row was found (malformed/empty file).
+ */
+function dormouse_parse_objset_file(string $contents): ?array
+{
+    $lines = explode("\n", $contents);
+    $wanted = ['dataset_name' => null, 'reads' => 0, 'nread' => 0, 'writes' => 0, 'nwritten' => 0, 'nunlinks' => 0];
+    foreach (array_slice($lines, 2) as $line) {
+        $line = trim($line, " \t\r");
+        if ($line === '') {
+            continue;
+        }
+        $parts = preg_split('/\s+/', $line, 3);
+        if (count($parts) < 3) {
+            continue;
+        }
+        [$key, , $value] = $parts;
+        if (!array_key_exists($key, $wanted)) {
+            continue;
+        }
+        $wanted[$key] = $key === 'dataset_name' ? $value : (int) $value;
+    }
+    return $wanted['dataset_name'] === null ? null : $wanted;
+}
+
+/** Lists objset-0x* kstat files for a pool. Missing dir just returns no files. */
+function dormouse_list_objset_files(string $kstatDir, string $poolName): array
+{
+    $files = @glob(rtrim($kstatDir, '/') . '/' . $poolName . '/objset-0x*');
+    return $files === false ? [] : $files;
+}
+
+/**
+ * Parses /proc/diskstats into raw per-device counters, keyed by device name
+ * (e.g. "sdc"). Standard fixed-position format; fields beyond the first 10
+ * (discard/flush stats on newer kernels) are ignored.
+ */
+function dormouse_parse_diskstats(string $contents): array
+{
+    $out = [];
+    foreach (explode("\n", $contents) as $line) {
+        $line = trim($line);
+        if ($line === '') {
+            continue;
+        }
+        $fields = preg_split('/\s+/', $line);
+        if ($fields === false || count($fields) < 10) {
+            continue;
+        }
+        $out[$fields[2]] = [
+            'reads' => (int) $fields[3],
+            'sectors_read' => (int) $fields[5],
+            'writes' => (int) $fields[7],
+            'sectors_written' => (int) $fields[9],
+        ];
+    }
+    return $out;
+}
+
+/**
+ * Maps pool disk names (from disks.ini, via dormouse_pool_disk_names()) to
+ * their device and current diskstats row, for feeding into
+ * dormouse_zfs_poll_tick(). A disk with no device= in disks.ini is skipped;
+ * a mapped device absent from this tick's diskstats gets stats=null so the
+ * caller can skip it for this tick without losing delta continuity.
+ */
+function dormouse_zfs_device_stats(array $sections, array $poolDisks, array $diskstats): array
+{
+    $out = [];
+    foreach ($poolDisks as $diskName) {
+        $device = $sections[$diskName]['device'] ?? '';
+        if ($device === '') {
+            continue;
+        }
+        $out[$diskName] = ['device' => $device, 'stats' => $diskstats[$device] ?? null];
+    }
+    return $out;
+}
+
+/** True if any delta in the set is null (a reset) or non-zero — the row-worthiness test. */
+function dormouse_zfs_deltas_notable(array $deltas): bool
+{
+    foreach ($deltas as $d) {
+        if ($d === null || $d !== 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Advances ZFS I/O tracking by one poll tick. First sight of a dataset or
+ * device establishes a silent baseline (state carried forward, no row). A
+ * row is written only when at least one field's delta is non-zero or a
+ * reset (NULL) — reused via dormouse_disk_delta(), the same
+ * reset-means-NULL rule Source C already uses. A device with no diskstats
+ * entry this tick (stats=null) is skipped and its prior state is dropped,
+ * matching a missing diskstats line rather than guessing a delta.
+ *
+ * @param array<string,array> $prevState "dataset\0<name>" | "device\0<name>" => raw counters
+ * @param array<string,array> $datasets dataset_name => dormouse_parse_objset_file() result
+ * @param array<string,array> $devices diskname => ['device'=>sdX,'stats'=>diskstats row|null], from dormouse_zfs_device_stats()
+ * @return array{0: array<int,array>, 1: array<string,array>}
+ */
+function dormouse_zfs_poll_tick(array $prevState, array $datasets, array $devices): array
+{
+    $rows = [];
+    $newState = [];
+
+    foreach ($datasets as $name => $d) {
+        $key = "dataset\0$name";
+        $cur = ['reads' => $d['reads'], 'nread' => $d['nread'], 'writes' => $d['writes'], 'nwritten' => $d['nwritten'], 'unlinks' => $d['nunlinks']];
+        if (isset($prevState[$key])) {
+            $prev = $prevState[$key];
+            $deltas = [
+                'reads' => dormouse_disk_delta($cur['reads'], $prev['reads']),
+                'nread' => dormouse_disk_delta($cur['nread'], $prev['nread']),
+                'writes' => dormouse_disk_delta($cur['writes'], $prev['writes']),
+                'nwritten' => dormouse_disk_delta($cur['nwritten'], $prev['nwritten']),
+                'unlinks' => dormouse_disk_delta($cur['unlinks'], $prev['unlinks']),
+            ];
+            if (dormouse_zfs_deltas_notable($deltas)) {
+                $rows[] = ['kind' => 'dataset', 'name' => $name] + $deltas;
+            }
+        }
+        $newState[$key] = $cur;
+    }
+
+    foreach ($devices as $diskName => $entry) {
+        if ($entry['stats'] === null) {
+            continue;
+        }
+        $stats = $entry['stats'];
+        $name = $diskName . '/' . $entry['device'];
+        $key = "device\0$name";
+        $cur = [
+            'reads' => $stats['reads'],
+            'nread' => $stats['sectors_read'] * 512,
+            'writes' => $stats['writes'],
+            'nwritten' => $stats['sectors_written'] * 512,
+        ];
+        if (isset($prevState[$key])) {
+            $prev = $prevState[$key];
+            $deltas = [
+                'reads' => dormouse_disk_delta($cur['reads'], $prev['reads']),
+                'nread' => dormouse_disk_delta($cur['nread'], $prev['nread']),
+                'writes' => dormouse_disk_delta($cur['writes'], $prev['writes']),
+                'nwritten' => dormouse_disk_delta($cur['nwritten'], $prev['nwritten']),
+            ];
+            if (dormouse_zfs_deltas_notable($deltas)) {
+                $rows[] = ['kind' => 'device', 'name' => $name, 'unlinks' => null] + $deltas;
+            }
+        }
+        $newState[$key] = $cur;
+    }
+
+    return [$rows, $newState];
+}
+
+function dormouse_record_zfs_io(
+    SQLite3 $db,
+    int $ts,
+    string $kind,
+    string $name,
+    ?int $reads,
+    ?int $nread,
+    ?int $writes,
+    ?int $nwritten,
+    ?int $unlinks
+): void {
+    $stmt = $db->prepare('INSERT INTO zfs_io (ts, kind, name, reads, nread, writes, nwritten, unlinks)
+        VALUES (:ts, :kind, :name, :reads, :nread, :writes, :nwritten, :unlinks)');
+    $stmt->bindValue(':ts', $ts, SQLITE3_INTEGER);
+    $stmt->bindValue(':kind', $kind, SQLITE3_TEXT);
+    $stmt->bindValue(':name', $name, SQLITE3_TEXT);
+    $stmt->bindValue(':reads', $reads, $reads === null ? SQLITE3_NULL : SQLITE3_INTEGER);
+    $stmt->bindValue(':nread', $nread, $nread === null ? SQLITE3_NULL : SQLITE3_INTEGER);
+    $stmt->bindValue(':writes', $writes, $writes === null ? SQLITE3_NULL : SQLITE3_INTEGER);
+    $stmt->bindValue(':nwritten', $nwritten, $nwritten === null ? SQLITE3_NULL : SQLITE3_INTEGER);
+    $stmt->bindValue(':unlinks', $unlinks, $unlinks === null ? SQLITE3_NULL : SQLITE3_INTEGER);
+    $stmt->execute();
+}
+
+function dormouse_trim_zfs_io(SQLite3 $db, int $retainDays, ?int $nowTs = null): void
+{
+    $nowTs ??= time();
+    $cutoff = $nowTs - ($retainDays * 86400);
+    $stmt = $db->prepare('DELETE FROM zfs_io WHERE ts < :cutoff');
+    $stmt->bindValue(':cutoff', $cutoff, SQLITE3_INTEGER);
+    $stmt->execute();
+}
+
+/** Per-kind/name delta sums over [$fromTs, $toTs) — used for a spin event's ±60s zfs_window. */
+function dormouse_zfs_window(SQLite3 $db, int $fromTs, int $toTs): array
+{
+    $stmt = $db->prepare("SELECT kind, name, SUM(reads) AS reads, SUM(nread) AS nread,
+        SUM(writes) AS writes, SUM(nwritten) AS nwritten, SUM(unlinks) AS unlinks
+        FROM zfs_io WHERE ts >= :from AND ts < :to GROUP BY kind, name ORDER BY kind, name");
+    $stmt->bindValue(':from', $fromTs, SQLITE3_INTEGER);
+    $stmt->bindValue(':to', $toTs, SQLITE3_INTEGER);
+    $result = $stmt->execute();
+    $out = [];
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $out[] = [
+            'kind' => $row['kind'],
+            'name' => $row['name'],
+            'reads' => (int) $row['reads'],
+            'nread' => (int) $row['nread'],
+            'writes' => (int) $row['writes'],
+            'nwritten' => (int) $row['nwritten'],
+            'unlinks' => $row['unlinks'] !== null ? (int) $row['unlinks'] : null,
+        ];
+    }
+    return $out;
+}
+
+/** Per-dataset I/O totals over the last 24h, keyed by dataset name. */
+function dormouse_zfs_24h(SQLite3 $db, ?int $nowTs = null): array
+{
+    $nowTs ??= time();
+    $since = $nowTs - 86400;
+    $stmt = $db->prepare("SELECT name, SUM(reads) AS reads, SUM(nread) AS nread,
+        SUM(writes) AS writes, SUM(nwritten) AS nwritten, SUM(unlinks) AS unlinks
+        FROM zfs_io WHERE kind = 'dataset' AND ts >= :since GROUP BY name ORDER BY name");
+    $stmt->bindValue(':since', $since, SQLITE3_INTEGER);
+    $result = $stmt->execute();
+    $out = [];
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $out[$row['name']] = [
+            'reads' => (int) $row['reads'],
+            'nread' => (int) $row['nread'],
+            'writes' => (int) $row['writes'],
+            'nwritten' => (int) $row['nwritten'],
+            'unlinks' => (int) $row['unlinks'],
         ];
     }
     return $out;

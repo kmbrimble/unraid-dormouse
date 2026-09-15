@@ -270,6 +270,71 @@ each with the distinct non-disk activity rows in the 60s window immediately
 before and after it — shown on the settings page next to the transition so a
 spin-up can be read next to the opens that plausibly caused it.
 
+## Source D — ZFS-level I/O attribution (0.2.2)
+
+**Why:** the 0.2.1 spin log shows spin-ups with no activity in any watched
+share. `inotify` only sees file opens under watched roots, so ZFS-internal
+I/O — metadata, snapshots, scrubs, the root dataset, anything on a share we
+don't watch — is invisible to Sources A/B. The kernel's own ZFS counters see
+everything, and reading them never touches the disks.
+
+Verified on the host, 15 Sep 2026 (do not re-derive; the fixtures under
+`tests/fixtures/objset-*` and `tests/fixtures/diskstats` are sanitised
+re-captures of these exact shapes, not invented):
+
+- **`/proc/spl/kstat/zfs/<pool>/objset-0x*`** — one file per dataset: a
+  numeric header line, a `name type data` column-header line, then rows
+  shaped `key type value` (e.g. `dataset_name 7 snowflake/Games`, `writes 4
+  <n>`, `nwritten 4 <bytes>`, `reads 4 <n>`, `nread 4 <bytes>`, `nunlinks 4
+  <n>`, `nunlinked 4 <n>`, plus `zil_*` rows that are ignored).
+  `dormouse_parse_objset_file()` splits each row into at most 3 tokens
+  (`key`, `type`, rest-of-line) specifically so a dataset name containing a
+  space — `snowflake/Filing Cabinet` — survives intact as the value. Datasets
+  on this host: `snowflake` (root) and `snowflake/<Share>` for each of
+  Content, Dashcam, Downloads, Filing Cabinet, Games, Kieren, Movies, Music,
+  Photos, Teegan.
+- **`/proc/diskstats`** — standard kernel format;
+  `dormouse_parse_diskstats()` reads fields 4/6/8/10 (reads completed,
+  sectors read, writes completed, sectors written) keyed by device name.
+  The six pool devices (`sdc`–`sdh` on this host) are mapped to disk names
+  via the same `disks.ini` parser Source C already uses
+  (`dormouse_zfs_device_stats()`) — never hardcoded, since a live-boot device
+  reassignment would silently break a hardcoded map.
+- **`zpool iostat` / `zpool events` are not polled.** They would mean a fork
+  per tick for numbers the kstats already expose directly. **Standing rule:
+  ZFS state comes from kstats, never from a `zpool`/`zfs` command on a
+  timer** — the same "never stat pool paths on a timer" principle as the
+  rest of this file, extended to shelling out on a timer as well.
+- Counters are monotonic since pool import/kernel boot. A negative delta
+  (counter reset, e.g. a pool re-import) is recorded as `NULL`, never a
+  huge unsigned number — the same rule Source C already applies.
+
+On the daemon's existing 15s tick, `dormouse_zfs_poll_tick()` diffs every
+dataset and device against the previous tick: first sight of a name is a
+silent baseline (state recorded, no row — unlike Source C's baseline `state`
+row); a tick where every field's delta is zero writes nothing; otherwise one
+row per dataset/device into the new `zfs_io` table (`kind='dataset'|'device'`,
+`name` = dataset name or `<diskname>/<sdX>`, `reads`/`nread`/`writes`/
+`nwritten` deltas, `unlinks` = the `nunlinks` delta for datasets, always
+`NULL` for devices). Device bytes are sectors × 512. A device absent from a
+given tick's `/proc/diskstats` (`stats === null` from
+`dormouse_zfs_device_stats()`) is skipped for that tick and its prior state
+is dropped, rather than guessing a delta across the gap. `stats` key
+`zfs_last_poll_ts` advances every tick regardless of whether any row was
+written. Trimmed by the same `activity_retain_days` job as `activity`, via
+`dormouse_trim_zfs_io()`.
+
+`dormouse_zfs_window()` sums per-dataset/per-device deltas over an arbitrary
+`[from, to)` range; `dormouse_build_spin_events()` calls it with the same
+±60s window already used for the `before`/`after` activity rows, so a
+spin-up with zero watched-share activity now shows e.g. `snowflake (root):
+2,201 reads, 88 MB` instead of nothing. `dormouse_zfs_24h()` feeds the
+settings page's "ZFS I/O — last 24h by dataset" table. Config:
+`zfs_pool_name` (default `snowflake`) and `zfs_kstat_dir` (default
+`/proc/spl/kstat/zfs`, overridable for tests) — both cfg keys, not env vars,
+matching `pool_disk_prefix`'s existing pattern rather than the process-path
+env-var overrides (`DORMOUSE_PIDFILE` etc.).
+
 ## Movies is out of scope
 
 Never watched, never listed as a watched share, never acted on — PlexCache-D

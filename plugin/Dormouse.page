@@ -28,6 +28,25 @@ function esc(s) {
     });
 }
 
+function humanBytes(n) {
+    if (n === null || n === undefined) { return '—'; }
+    var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var i = 0;
+    n = Number(n);
+    while (Math.abs(n) >= 1024 && i < units.length - 1) {
+        n /= 1024;
+        i++;
+    }
+    return n.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+}
+
+function renderZfsWindow(rows) {
+    if (!rows || !rows.length) { return '(no ZFS I/O in this window)'; }
+    return rows.map(function (r) {
+        return esc(r.name) + ' (' + esc(r.kind) + '): ' + esc(r.reads) + ' reads, ' + humanBytes(r.nread);
+    }).join('<br>');
+}
+
 function dormouseRender(data) {
     var el = document.getElementById('dormouse-status');
     if (data.error) {
@@ -52,15 +71,24 @@ function dormouseRender(data) {
     }
     html += '</table>';
 
-    html += '<h3>Disk spin events</h3><table border="1" cellpadding="4"><tr><th>Time</th><th>Disk</th><th>Event</th><th>Reads &Delta;</th><th>Writes &Delta;</th><th>Around the transition</th></tr>';
+    html += '<h3>Disk spin events</h3><table border="1" cellpadding="4"><tr><th>Time</th><th>Disk</th><th>Event</th><th>Reads &Delta;</th><th>Writes &Delta;</th><th>Around the transition</th><th>ZFS I/O (&plusmn;60s)</th></tr>';
     data.spin_events.forEach(function (ev) {
         var around = ev.before.concat(ev.after).map(function (row) {
             return esc(row.source + '/' + row.event + ' ' + row.rel_path + (row.client_ip ? ' (' + row.client_ip + ')' : ''));
         }).join('<br>');
         html += '<tr><td>' + esc(new Date(ev.ts * 1000).toLocaleString()) + '</td><td>' + esc(ev.disk) + '</td><td>' +
             esc(ev.event) + '</td><td>' + esc(ev.reads_delta === null ? '—' : ev.reads_delta) + '</td><td>' +
-            esc(ev.writes_delta === null ? '—' : ev.writes_delta) + '</td><td>' + around + '</td></tr>';
+            esc(ev.writes_delta === null ? '—' : ev.writes_delta) + '</td><td>' + around + '</td><td>' +
+            renderZfsWindow(ev.zfs_window) + '</td></tr>';
     });
+    html += '</table>';
+
+    html += '<h3>ZFS I/O — last 24h by dataset</h3><table border="1" cellpadding="4"><tr><th>Dataset</th><th>Reads</th><th>Read</th><th>Writes</th><th>Written</th><th>Unlinks</th></tr>';
+    for (var dataset in data.zfs_24h) {
+        var z = data.zfs_24h[dataset];
+        html += '<tr><td>' + esc(dataset) + '</td><td>' + esc(z.reads) + '</td><td>' + humanBytes(z.nread) +
+            '</td><td>' + esc(z.writes) + '</td><td>' + humanBytes(z.nwritten) + '</td><td>' + esc(z.unlinks) + '</td></tr>';
+    }
     html += '</table>';
 
     html += '<h3>Last 24h by share</h3><table border="1" cellpadding="4"><tr><th>Share</th><th>SMB opens</th><th>Inotify accesses</th></tr>';

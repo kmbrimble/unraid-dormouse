@@ -3,7 +3,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "dormouse">
 <!ENTITY author    "kmbrimble">
-<!ENTITY version   "0.2.1">
+<!ENTITY version   "0.2.2">
 <!ENTITY launch    "Settings/Dormouse">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/kmbrimble/unraid-dormouse/main/dormouse.plg">
 <!ENTITY gitURL    "https://github.com/kmbrimble/unraid-dormouse/releases/download/v&version;">
@@ -15,6 +15,17 @@
 <PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" support="https://github.com/kmbrimble/unraid-dormouse" min="7.0" icon="moon-o">
 
 <CHANGES>
+###0.2.2
+- Source D: per-dataset and per-device ZFS I/O attribution, from
+  /proc/spl/kstat/zfs/&lt;pool&gt;/objset-0x* and /proc/diskstats on the
+  existing 15s tick — never from zpool/zfs commands, and never touching the
+  pool itself. Deltas since the previous tick are written to a new zfs_io
+  table only when non-zero (a counter reset is recorded as NULL); first
+  sight of a dataset/device is a silent baseline, no row. Settings page
+  gains a "ZFS I/O — last 24h by dataset" table, and each disk spin event
+  now shows the per-dataset/device ZFS I/O in its +-60s window, explaining
+  spin-ups with no watched-share activity (root dataset, snapshots,
+  metadata, unwatched shares). Still moves nothing.
 ###0.2.1
 - Source C: per-disk spin-state log from /var/local/emhttp/disks.ini (never
   from touching the pool). Records spinup/spindown transitions with
@@ -91,6 +102,8 @@ if [[ ! -f "$CFG" ]] || ! grep -qE '^[A-Za-z_]+=' "$CFG"; then
     echo 'activity_retain_days=30'
     echo 'db_path=/mnt/cache/appdata/dormouse/manifest.db'
     echo 'pool_disk_prefix=snowflake'
+    echo 'zfs_pool_name=snowflake'
+    echo 'zfs_kstat_dir=/proc/spl/kstat/zfs'
   } > "$CFG"
 fi
 

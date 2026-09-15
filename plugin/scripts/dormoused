@@ -117,10 +117,12 @@ $smbSeen = [];
 $accessBuffer = []; // key => ['share','rel_path','first_ts','count']
 $lastSmbPoll = 0;
 $lastDiskPoll = 0;
+$lastZfsPoll = 0;
 $lastWatchRefresh = time();
 $lastTrim = 0;
 $accessWindowSeconds = 60;
 $diskState = []; // name => ['spundown','numReads','numWrites','device']
+$zfsState = []; // "dataset\0<name>"|"device\0<name>" => raw counters
 
 while ($running) {
     if ($inotifyChild !== null) {
@@ -243,6 +245,39 @@ while ($running) {
         $lastDiskPoll = $now;
     }
 
+    if ($now - $lastZfsPoll >= $config['smb_poll_seconds']) {
+        // Source D — kstats only, never zpool/zfs commands (CLAUDE.md): reading
+        // /proc/spl/kstat/zfs/* and /proc/diskstats never touches the pool.
+        $datasets = [];
+        foreach (dormouse_list_objset_files($config['zfs_kstat_dir'], $config['zfs_pool_name']) as $objsetFile) {
+            $raw = @file_get_contents($objsetFile);
+            if ($raw === false) {
+                continue;
+            }
+            $parsed = dormouse_parse_objset_file($raw);
+            if ($parsed !== null) {
+                $datasets[$parsed['dataset_name']] = $parsed;
+            }
+        }
+
+        $devices = [];
+        $disksRaw = @file_get_contents($disksIniFile);
+        $diskstatsRaw = @file_get_contents('/proc/diskstats');
+        if ($disksRaw !== false && $diskstatsRaw !== false) {
+            $sections = dormouse_parse_disks_ini($disksRaw);
+            $poolDisks = dormouse_pool_disk_names($sections, $config['pool_disk_prefix']);
+            $diskstats = dormouse_parse_diskstats($diskstatsRaw);
+            $devices = dormouse_zfs_device_stats($sections, $poolDisks, $diskstats);
+        }
+
+        [$zfsRows, $zfsState] = dormouse_zfs_poll_tick($zfsState, $datasets, $devices);
+        foreach ($zfsRows as $row) {
+            dormouse_record_zfs_io($db, $now, $row['kind'], $row['name'], $row['reads'], $row['nread'], $row['writes'], $row['nwritten'], $row['unlinks']);
+        }
+        dormouse_stat_set($db, 'zfs_last_poll_ts', $now);
+        $lastZfsPoll = $now;
+    }
+
     // Checked again here, not just at the top of the loop: a SIGTERM that
     // lands mid-iteration must not walk the pool (possibly tens of seconds
     // on a cold start) before honouring shutdown — rc.dormouse only waits
@@ -271,6 +306,7 @@ while ($running) {
 
     if ($now - $lastTrim >= 3600) {
         dormouse_trim_activity($db, $config['activity_retain_days'], $now);
+        dormouse_trim_zfs_io($db, $config['activity_retain_days'], $now);
         $lastTrim = $now;
     }
 }
