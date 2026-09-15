@@ -1,0 +1,10 @@
+6 1 0x01 8 240 123456789 987654322
+name                            type data
+dataset_name                    7    snowflake/Content
+writes                          4    500
+nwritten                        4    10485760
+reads                           4    9000
+nread                           4    9663676416
+nunlinks                        4    0
+nunlinked                       4    0
+zil_itx_needcopy_bytes          4    0

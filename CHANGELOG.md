@@ -10,6 +10,24 @@ zero-padded, because Unraid's plugin manager compares versions with a plain
 
 ## [Unreleased]
 
+### Plan — Source D: ZFS-level I/O attribution (0.2.2)
+
+The 0.2.1 spin log shows spin-ups with no activity in any watched share:
+inotify only sees opens under watched roots, so ZFS-internal I/O (metadata,
+snapshots, scrubs, the root dataset, any unwatched share) is invisible.
+`/proc/spl/kstat/zfs/<pool>/objset-0x*` (per-dataset reads/writes/bytes) and
+`/proc/diskstats` (per-device) are read on the existing 15s tick — reading
+kstats never touches the pool. Deltas since the previous tick are computed;
+rows are written to a new `zfs_io` table only when a delta is non-zero (or a
+reset, recorded as NULL); first sight of a dataset/device is a silent
+baseline. `spin_events` in the API gain a `zfs_window` (±60s delta sums) and
+the API/page gain a `zfs_24h` per-dataset summary. Still Phase 2 — no moves.
+Files: `plugin/scripts/lib.php` (parsing, schema, tick, aggregation),
+`plugin/scripts/dormoused` (poll integration), `plugin/scripts/dormouse-api.php`
+(no change needed — status already flows through `dormouse_build_status`),
+`plugin/Dormouse.page` (ZFS table + zfs_window rendering), `tests/run.php`
+(new fixtures + coverage), `dormouse.plg`/`README.md` (version 0.2.2).
+
 ## [0.2.1] - 2026-09-14
 
 ### Added

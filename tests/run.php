@@ -698,6 +698,330 @@ t('dormouse_build_disk_states reports current spundown flag and since-timestamp 
     @unlink($tmp . '-shm');
 });
 
+// --- Phase 2.2: Source D — objset (dataset) parsing --------------------------------
+
+t('objset parsing extracts dataset_name and numeric fields, ignoring zil_* rows', function () use ($repoRoot) {
+    $contents = file_get_contents($repoRoot . '/tests/fixtures/objset-content');
+    $parsed = dormouse_parse_objset_file($contents);
+    assert_eq('snowflake/Content', $parsed['dataset_name']);
+    assert_eq(9000, $parsed['reads']);
+    assert_eq(9663676416, $parsed['nread']);
+    assert_eq(500, $parsed['writes']);
+    assert_eq(10485760, $parsed['nwritten']);
+    assert_eq(0, $parsed['nunlinks']);
+    assert_true(!array_key_exists('zil_itx_needcopy_bytes', $parsed), 'zil_* rows must not leak into the parsed result');
+});
+
+t('objset parsing handles the root dataset (no slash in dataset_name)', function () use ($repoRoot) {
+    $parsed = dormouse_parse_objset_file(file_get_contents($repoRoot . '/tests/fixtures/objset-root'));
+    assert_eq('snowflake', $parsed['dataset_name']);
+    assert_eq(2201, $parsed['reads']);
+    assert_eq(3, $parsed['nunlinks']);
+});
+
+t('objset parsing preserves a space in a dataset name (Filing Cabinet)', function () use ($repoRoot) {
+    $parsed = dormouse_parse_objset_file(file_get_contents($repoRoot . '/tests/fixtures/objset-filing-cabinet'));
+    assert_eq('snowflake/Filing Cabinet', $parsed['dataset_name']);
+    assert_eq(12, $parsed['reads']);
+});
+
+t('objset parsing returns null for a file with no dataset_name row', function () {
+    assert_true(dormouse_parse_objset_file("6 1 0x01\nname type data\nreads 4 1\n") === null);
+});
+
+t('dormouse_list_objset_files globs objset-0x* under kstat_dir/pool, ignoring other files', function () {
+    $dir = sys_get_temp_dir() . '/dormouse-kstat-' . uniqid();
+    mkdir("$dir/snowflake", 0755, true);
+    file_put_contents("$dir/snowflake/objset-0x31", 'a');
+    file_put_contents("$dir/snowflake/objset-0x32", 'b');
+    file_put_contents("$dir/snowflake/io", 'c'); // a sibling kstat file, must be ignored
+    $files = dormouse_list_objset_files($dir, 'snowflake');
+    sort($files);
+    assert_eq(["$dir/snowflake/objset-0x31", "$dir/snowflake/objset-0x32"], $files);
+    exec('rm -rf ' . escapeshellarg($dir));
+});
+
+// --- Phase 2.2: Source D — diskstats parsing ---------------------------------------
+
+t('diskstats parsing extracts reads/sectors_read/writes/sectors_written keyed by device', function () use ($repoRoot) {
+    $stats = dormouse_parse_diskstats(file_get_contents($repoRoot . '/tests/fixtures/diskstats'));
+    assert_true(isset($stats['sdc']));
+    assert_eq(500000, $stats['sdc']['reads']);
+    assert_eq(24000000, $stats['sdc']['sectors_read']);
+    assert_eq(300000, $stats['sdc']['writes']);
+    assert_eq(15000000, $stats['sdc']['sectors_written']);
+    assert_true(isset($stats['nvme0n1']), 'non-pool devices are still parsed; filtering to the pool happens in the device map');
+});
+
+t('dormouse_zfs_device_stats maps pool disk names to device + diskstats via disks.ini, skipping disks with no device', function () use ($repoRoot) {
+    $sections = dormouse_parse_disks_ini(file_get_contents($repoRoot . '/tests/fixtures/disks.ini'));
+    $poolDisks = dormouse_pool_disk_names($sections, 'snowflake');
+    $diskstats = dormouse_parse_diskstats(file_get_contents($repoRoot . '/tests/fixtures/diskstats'));
+    $devices = dormouse_zfs_device_stats($sections, $poolDisks, $diskstats);
+
+    assert_eq('sdc', $devices['snowflake']['device']);
+    assert_eq(500000, $devices['snowflake']['stats']['reads']);
+    assert_eq('sdh', $devices['snowflake6']['device']);
+    assert_eq(460000, $devices['snowflake6']['stats']['reads']);
+
+    $sections['snowflake7'] = ['device' => ''];
+    $devices2 = dormouse_zfs_device_stats($sections, ['snowflake7'], $diskstats);
+    assert_eq([], $devices2, 'a disk with no device must be skipped, not fatal');
+});
+
+t('dormouse_zfs_device_stats reports a null stats entry when a mapped device has no diskstats line', function () {
+    $sections = ['snowflake' => ['device' => 'sdz']];
+    $devices = dormouse_zfs_device_stats($sections, ['snowflake'], []);
+    assert_true($devices['snowflake']['stats'] === null);
+});
+
+// --- Phase 2.2: Source D — zfs_io schema and delta tick -----------------------------
+
+t('zfs_io table is created idempotently alongside the rest of the schema', function () {
+    $tmpBase = tempnam(sys_get_temp_dir(), 'dormouse-zfsschema-');
+    unlink($tmpBase);
+    $tmp = $tmpBase . '.sqlite';
+    $db1 = dormouse_open_db($tmp);
+    $db1->close();
+    $db2 = dormouse_open_db($tmp); // must not throw against an existing zfs_io table
+    $cols = [];
+    $result = $db2->query('PRAGMA table_info(zfs_io)');
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $cols[] = $row['name'];
+    }
+    foreach (['ts', 'kind', 'name', 'reads', 'nread', 'writes', 'nwritten', 'unlinks'] as $expected) {
+        assert_true(in_array($expected, $cols, true), "zfs_io missing column $expected");
+    }
+    $db2->close();
+    unlink($tmp);
+    @unlink($tmp . '-wal');
+    @unlink($tmp . '-shm');
+});
+
+t('opening a db with an existing 0.2.1-shaped schema (no zfs_io table) creates zfs_io without disturbing activity rows', function () {
+    $tmpBase = tempnam(sys_get_temp_dir(), 'dormouse-zfsmigrate-');
+    unlink($tmpBase);
+    $tmp = $tmpBase . '.sqlite';
+
+    $db = new SQLite3($tmp);
+    $db->exec('CREATE TABLE activity (
+        ts INTEGER NOT NULL, rel_path TEXT NOT NULL, share TEXT NOT NULL,
+        client_ip TEXT NOT NULL, source TEXT NOT NULL, event TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 1, reads_delta INTEGER, writes_delta INTEGER
+    )');
+    $db->exec("INSERT INTO activity (ts, rel_path, share, client_ip, source, event, count) VALUES (1000, 'a.mkv', 'Content', '', 'smb', 'open', 1)");
+    $db->close();
+
+    $db2 = dormouse_open_db($tmp);
+    $exists = $db2->querySingle("SELECT name FROM sqlite_master WHERE type='table' AND name='zfs_io'");
+    assert_eq('zfs_io', $exists);
+    assert_eq(1, (int) $db2->querySingle('SELECT COUNT(*) FROM activity'));
+    $db2->close();
+    unlink($tmp);
+    @unlink($tmp . '-wal');
+    @unlink($tmp . '-shm');
+});
+
+t('first tick for a dataset/device establishes a silent baseline: no rows', function () {
+    $datasets = ['snowflake/Content' => ['dataset_name' => 'snowflake/Content', 'reads' => 100, 'nread' => 5000, 'writes' => 10, 'nwritten' => 500, 'nunlinks' => 0]];
+    $devices = ['snowflake' => ['device' => 'sdc', 'stats' => ['reads' => 200, 'sectors_read' => 1000, 'writes' => 20, 'sectors_written' => 400]]];
+    [$rows, $newState] = dormouse_zfs_poll_tick([], $datasets, $devices);
+    assert_eq([], $rows, 'baseline tick must write no rows');
+    assert_true(isset($newState["dataset\0snowflake/Content"]));
+    assert_true(isset($newState["device\0snowflake/sdc"]));
+});
+
+t('a zero-delta tick produces no rows', function () {
+    $prevDatasetState = ['reads' => 100, 'nread' => 5000, 'writes' => 10, 'nwritten' => 500, 'unlinks' => 0];
+    $prev = ["dataset\0snowflake/Content" => $prevDatasetState];
+    $datasets = ['snowflake/Content' => ['dataset_name' => 'snowflake/Content', 'reads' => 100, 'nread' => 5000, 'writes' => 10, 'nwritten' => 500, 'nunlinks' => 0]];
+    [$rows, ] = dormouse_zfs_poll_tick($prev, $datasets, []);
+    assert_eq([], $rows);
+});
+
+t('a non-zero dataset delta produces one dataset row with the per-field deltas', function () {
+    $prev = ["dataset\0snowflake/Content" => ['reads' => 100, 'nread' => 5000, 'writes' => 10, 'nwritten' => 500, 'unlinks' => 0]];
+    $datasets = ['snowflake/Content' => ['dataset_name' => 'snowflake/Content', 'reads' => 9100, 'nread' => 9668676, 'writes' => 510, 'nwritten' => 10986260, 'nunlinks' => 2]];
+    [$rows, $newState] = dormouse_zfs_poll_tick($prev, $datasets, []);
+    assert_eq(1, count($rows));
+    assert_eq('dataset', $rows[0]['kind']);
+    assert_eq('snowflake/Content', $rows[0]['name']);
+    assert_eq(9000, $rows[0]['reads']);
+    assert_eq(9663676, $rows[0]['nread']);
+    assert_eq(500, $rows[0]['writes']);
+    assert_eq(10985760, $rows[0]['nwritten']);
+    assert_eq(2, $rows[0]['unlinks']);
+    assert_eq(9100, $newState["dataset\0snowflake/Content"]['reads']);
+});
+
+t('a device delta converts sectors to bytes (x512) and produces one device row', function () {
+    $prev = ["device\0snowflake/sdc" => ['reads' => 200, 'nread' => 1000 * 512, 'writes' => 20, 'nwritten' => 400 * 512]];
+    $devices = ['snowflake' => ['device' => 'sdc', 'stats' => ['reads' => 250, 'sectors_read' => 1200, 'writes' => 25, 'sectors_written' => 450]]];
+    [$rows, ] = dormouse_zfs_poll_tick($prev, [], $devices);
+    assert_eq(1, count($rows));
+    assert_eq('device', $rows[0]['kind']);
+    assert_eq('snowflake/sdc', $rows[0]['name']);
+    assert_eq(50, $rows[0]['reads']);
+    assert_eq(200 * 512, $rows[0]['nread']);
+    assert_eq(5, $rows[0]['writes']);
+    assert_eq(50 * 512, $rows[0]['nwritten']);
+    assert_true($rows[0]['unlinks'] === null, 'device rows never carry unlinks');
+});
+
+t('a device with no diskstats entry this tick is skipped, not fatal', function () {
+    $prev = ["device\0snowflake/sdc" => ['reads' => 200, 'nread' => 1000, 'writes' => 20, 'nwritten' => 400]];
+    $devices = ['snowflake' => ['device' => 'sdc', 'stats' => null]];
+    [$rows, $newState] = dormouse_zfs_poll_tick($prev, [], $devices);
+    assert_eq([], $rows);
+    assert_true(!isset($newState["device\0snowflake/sdc"]), 'no stats this tick means no state update either');
+});
+
+t('a counter reset on a dataset field records NULL for that field, and still emits a row', function () {
+    $prev = ["dataset\0snowflake/Content" => ['reads' => 100000, 'nread' => 5000000, 'writes' => 10, 'nwritten' => 500, 'unlinks' => 0]];
+    $datasets = ['snowflake/Content' => ['dataset_name' => 'snowflake/Content', 'reads' => 5, 'nread' => 100, 'writes' => 10, 'nwritten' => 500, 'nunlinks' => 0]];
+    [$rows, ] = dormouse_zfs_poll_tick($prev, $datasets, []);
+    assert_eq(1, count($rows));
+    assert_true($rows[0]['reads'] === null, 'a reset counter must be recorded as NULL, never a huge number');
+    assert_true($rows[0]['nread'] === null);
+    assert_eq(0, $rows[0]['writes'], 'unaffected fields keep their real (zero) delta');
+});
+
+// --- Phase 2.2: Source D — recording, trim, aggregation ------------------------------
+
+t('dormouse_record_zfs_io writes a row including NULL fields', function () {
+    $tmpBase = tempnam(sys_get_temp_dir(), 'dormouse-zfsrecord-');
+    unlink($tmpBase);
+    $tmp = $tmpBase . '.sqlite';
+    $db = dormouse_open_db($tmp);
+    dormouse_record_zfs_io($db, 1000, 'dataset', 'snowflake/Content', 9000, 9663676, 500, 10985760, 2);
+    dormouse_record_zfs_io($db, 1000, 'device', 'snowflake/sdc', null, null, 5, 100, null);
+    assert_eq(2, (int) $db->querySingle('SELECT COUNT(*) FROM zfs_io'));
+    $row = $db->querySingle("SELECT reads FROM zfs_io WHERE kind='device' AND name='snowflake/sdc'", true);
+    assert_true($row['reads'] === null);
+    $db->close();
+    unlink($tmp);
+    @unlink($tmp . '-wal');
+    @unlink($tmp . '-shm');
+});
+
+t('dormouse_trim_zfs_io removes rows older than the retention window, keeps newer ones', function () {
+    $tmpBase = tempnam(sys_get_temp_dir(), 'dormouse-zfstrim-');
+    unlink($tmpBase);
+    $tmp = $tmpBase . '.sqlite';
+    $db = dormouse_open_db($tmp);
+    $now = 1_000_000_000;
+    dormouse_record_zfs_io($db, $now - (40 * 86400), 'dataset', 'snowflake/Content', 1, 1, 1, 1, 0);
+    dormouse_record_zfs_io($db, $now - (5 * 86400), 'dataset', 'snowflake/Content', 2, 2, 2, 2, 0);
+    dormouse_trim_zfs_io($db, 30, $now);
+    assert_eq(1, (int) $db->querySingle('SELECT COUNT(*) FROM zfs_io'));
+    assert_eq(2, (int) $db->querySingle('SELECT reads FROM zfs_io'));
+    $db->close();
+    unlink($tmp);
+    @unlink($tmp . '-wal');
+    @unlink($tmp . '-shm');
+});
+
+t('dormouse_zfs_window sums per-dataset and per-device deltas within [from, to)', function () {
+    $tmpBase = tempnam(sys_get_temp_dir(), 'dormouse-zfswindow-');
+    unlink($tmpBase);
+    $tmp = $tmpBase . '.sqlite';
+    $db = dormouse_open_db($tmp);
+    dormouse_record_zfs_io($db, 950, 'dataset', 'snowflake', 100, 20000, 0, 0, 0);
+    dormouse_record_zfs_io($db, 960, 'dataset', 'snowflake', 2100, 68000, 0, 0, 0);
+    dormouse_record_zfs_io($db, 960, 'device', 'snowflake/sdc', 300, 1536, 0, 0, null);
+    dormouse_record_zfs_io($db, 1200, 'dataset', 'snowflake', 999, 999, 0, 0, 0); // outside window
+
+    $window = dormouse_zfs_window($db, 940, 1000);
+    $byKindName = [];
+    foreach ($window as $row) {
+        $byKindName[$row['kind'] . '/' . $row['name']] = $row;
+    }
+    assert_eq(2200, $byKindName['dataset/snowflake']['reads']);
+    assert_eq(88000, $byKindName['dataset/snowflake']['nread']);
+    assert_eq(300, $byKindName['device/snowflake/sdc']['reads']);
+    assert_true(!isset($byKindName['dataset/snowflake']['reads']) || $byKindName['dataset/snowflake']['reads'] !== 999 + 2200, 'row outside the window must not be included');
+
+    $db->close();
+    unlink($tmp);
+    @unlink($tmp . '-wal');
+    @unlink($tmp . '-shm');
+});
+
+t('dormouse_zfs_24h totals per dataset over the last 24h, excluding device rows and older rows', function () {
+    $tmpBase = tempnam(sys_get_temp_dir(), 'dormouse-zfs24h-');
+    unlink($tmpBase);
+    $tmp = $tmpBase . '.sqlite';
+    $db = dormouse_open_db($tmp);
+    $now = 1_000_000_000;
+    dormouse_record_zfs_io($db, $now - 3600, 'dataset', 'snowflake/Content', 100, 1000, 10, 100, 1);
+    dormouse_record_zfs_io($db, $now - 7200, 'dataset', 'snowflake/Content', 50, 500, 5, 50, 0);
+    dormouse_record_zfs_io($db, $now - (25 * 3600), 'dataset', 'snowflake/Content', 999, 999, 999, 999, 999); // outside 24h
+    dormouse_record_zfs_io($db, $now - 100, 'device', 'snowflake/sdc', 10, 5120, 0, 0, null);
+
+    $totals = dormouse_zfs_24h($db, $now);
+    assert_eq(150, $totals['snowflake/Content']['reads']);
+    assert_eq(1500, $totals['snowflake/Content']['nread']);
+    assert_eq(1, $totals['snowflake/Content']['unlinks']);
+    assert_true(!isset($totals['snowflake/sdc']), 'device rows must not appear in the per-dataset 24h summary');
+
+    $db->close();
+    unlink($tmp);
+    @unlink($tmp . '-wal');
+    @unlink($tmp . '-shm');
+});
+
+t('spin_events gain a zfs_window with the per-dataset/device deltas around the transition', function () {
+    $tmpBase = tempnam(sys_get_temp_dir(), 'dormouse-zfsspin-');
+    unlink($tmpBase);
+    $tmp = $tmpBase . '.sqlite';
+    $db = dormouse_open_db($tmp);
+
+    dormouse_record_activity($db, 1000, 'snowflake/sdc', '', '', 'disk', 'spinup', 40, 40, 0);
+    dormouse_record_zfs_io($db, 1010, 'dataset', 'snowflake', 2201, 92200000, 0, 0, 0);
+    dormouse_record_zfs_io($db, 1010, 'dataset', 'snowflake/Movies', 5, 500, 0, 0, 0);
+    dormouse_record_zfs_io($db, 1300, 'dataset', 'snowflake', 999, 999, 0, 0, 0); // outside the +-60s window
+
+    $events = dormouse_build_spin_events($db, 30);
+    assert_eq(1, count($events));
+    assert_true(isset($events[0]['zfs_window']));
+    $byName = [];
+    foreach ($events[0]['zfs_window'] as $row) {
+        $byName[$row['name']] = $row;
+    }
+    assert_eq(2201, $byName['snowflake']['reads']);
+    assert_true(!isset($byName['snowflake']) || $byName['snowflake']['reads'] !== 999, 'the row outside the window must not be summed in');
+});
+
+t('dormouse_build_status includes a zfs_24h summary', function () {
+    $tmpBase = tempnam(sys_get_temp_dir(), 'dormouse-zfsstatus-');
+    unlink($tmpBase);
+    $tmp = $tmpBase . '.sqlite';
+    $db = dormouse_open_db($tmp);
+    dormouse_record_zfs_io($db, time() - 10, 'dataset', 'snowflake/Content', 100, 1000, 10, 100, 0);
+    $status = dormouse_build_status($db, dormouse_default_config(), '/nonexistent');
+    assert_true(isset($status['zfs_24h']['snowflake/Content']));
+    $db->close();
+    unlink($tmp);
+    @unlink($tmp . '-wal');
+    @unlink($tmp . '-shm');
+});
+
+// --- Phase 2.2: Source D — config defaults ------------------------------------------
+
+t('default config carries zfs_pool_name and zfs_kstat_dir', function () {
+    $cfg = dormouse_default_config();
+    assert_eq('snowflake', $cfg['zfs_pool_name']);
+    assert_eq('/proc/spl/kstat/zfs', $cfg['zfs_kstat_dir']);
+});
+
+t('dormoused reads Source D on its existing poll tick, never via zpool/zfs commands', function () use ($repoRoot) {
+    $src = file_get_contents($repoRoot . '/plugin/scripts/dormoused');
+    assert_true(str_contains($src, 'dormouse_list_objset_files'), 'dormoused must read objset kstat files');
+    assert_true(str_contains($src, 'dormouse_zfs_poll_tick'), 'dormoused must advance the ZFS delta tick');
+    assert_true(!preg_match('/\bzpool\b/', $src), 'dormoused must never shell out to zpool');
+    assert_true(!preg_match('/\bzfs\s+(iostat|list|get)\b/', $src), 'dormoused must never shell out to zfs commands');
+});
+
 // --- Phase 2: moves must be structurally impossible -------------------------------
 
 t('no move/delete code paths exist anywhere in the shipped plugin tree', function () use ($repoRoot) {
