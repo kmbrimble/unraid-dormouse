@@ -2,3 +2,4 @@ PLAN.md
 dist/
 build/
 .env
+.scratch/

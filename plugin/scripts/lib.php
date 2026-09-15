@@ -69,6 +69,34 @@ function dormouse_load_config(string $path): array
     return $config;
 }
 
+// --- Mount guards (0.2.3) -----------------------------------------------------
+
+/**
+ * Whether $dir is a real mountpoint, via the `mountpoint` CLI. Used to
+ * refuse creating dormouse's db/watch state on the RAM rootfs before the
+ * array's pools are mounted at boot (CLAUDE.md boot-order facts).
+ */
+function dormouse_is_mountpoint(string $dir): bool
+{
+    exec('mountpoint -q ' . escapeshellarg($dir), $output, $exitCode);
+    return $exitCode === 0;
+}
+
+/**
+ * Resolves whether $dir counts as mounted, given an optional env override
+ * ('0'/'1'), already normalised by the caller to null when unset. Compares
+ * `$override !== null` rather than the `getenv(...) ?: null` shortcut,
+ * which treats the string "0" as falsy and would silently ignore an
+ * explicit "not mounted" override — a real bug hit while building Godwit.
+ */
+function dormouse_resolve_mounted(?string $override, string $dir): bool
+{
+    if ($override !== null) {
+        return $override === '1';
+    }
+    return dormouse_is_mountpoint($dir);
+}
+
 // --- Manifest db -------------------------------------------------------------
 
 function dormouse_open_db(string $dbPath): SQLite3

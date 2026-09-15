@@ -1,0 +1,7 @@
+#!/bin/bash
+# emhttpd fires this during cmdStop, about to stop network services — before
+# unmounting_disks. dormoused holds manifest.db (and its -wal/-shm files)
+# open on /mnt/cache, so this is the point to release them before the
+# cache/pool actually unmount, matching how file.activity/unbalanced/
+# tips.and.tweaks stop their own daemons at this same event.
+bash "$(cd "$(dirname "$0")/.." && pwd)/scripts/rc.dormouse" stop

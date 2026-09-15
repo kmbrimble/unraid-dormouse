@@ -3,18 +3,32 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "dormouse">
 <!ENTITY author    "kmbrimble">
-<!ENTITY version   "0.2.2">
+<!ENTITY version   "0.2.3">
 <!ENTITY launch    "Settings/Dormouse">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/kmbrimble/unraid-dormouse/main/dormouse.plg">
 <!ENTITY gitURL    "https://github.com/kmbrimble/unraid-dormouse/releases/download/v&version;">
 <!ENTITY plgPATH   "/boot/config/plugins/&name;">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
-<!ENTITY md5       "1ba42c40a6d9b24c83ceba0380652265">
+<!ENTITY md5       "00000000000000000000000000000000">
 ]>
 
 <PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" support="https://github.com/kmbrimble/unraid-dormouse" min="7.0" icon="moon-o">
 
 <CHANGES>
+###0.2.3
+- Fixes a boot-order bug: plugins install before the cache/snowflake pools
+  are mounted at boot, so 0.2.2's unconditional daemon start in the
+  install step could create manifest.db on the RAM rootfs, silently covered
+  by the later cache mount and lost at shutdown (never actually fired —
+  Dormouse had not been through a boot since install, verified on the live
+  host 2026-09-15). dormoused now starts via the `started`/`stopping_svcs`
+  emhttpd event hooks (matching file.activity, unbalanced and
+  tips.and.tweaks), and the install step only starts it immediately when
+  the array is already up (plugin/scripts/array-ready.sh). dormoused also
+  refuses to run at all if cache_root or pool_root (from dormouse.cfg)
+  aren't real mountpoints, and rc.dormouse stop now escalates to SIGKILL
+  (dormoused and its inotifywait child) if a graceful stop times out, only
+  clearing the pidfile once death is confirmed. Still Phase 2 — no moves.
 ###0.2.2
 - Source D: per-dataset and per-device ZFS I/O attribution, from
   /proc/spl/kstat/zfs/&lt;pool&gt;/objset-0x* and /proc/diskstats on the
@@ -107,8 +121,24 @@ if [[ ! -f "$CFG" ]] || ! grep -qE '^[A-Za-z_]+=' "$CFG"; then
   } > "$CFG"
 fi
 
+# Plugins install before the cache pool mounts at boot (confirmed from
+# /boot/logs/syslog on the live host, 2026-09-15) — starting dormoused
+# unconditionally here, as 0.2.2 and earlier did, can create manifest.db on
+# the still-unmounted cache pool's RAM rootfs. Only start now if the array
+# is already up (a mid-session install/upgrade); a boot-time install defers
+# to the `started` event hook, which fires once the array and cache are
+# actually ready. See array-ready.sh.
+READY=1
+if [[ -f &emhttp;/scripts/array-ready.sh ]]; then
+  bash &emhttp;/scripts/array-ready.sh
+  READY=$?
+fi
 if [[ -f &emhttp;/scripts/rc.dormouse ]]; then
-  bash &emhttp;/scripts/rc.dormouse start
+  if [[ "$READY" -eq 0 ]]; then
+    bash &emhttp;/scripts/rc.dormouse start
+  else
+    echo "&name;: array not started yet — dormoused will start via the 'started' event hook"
+  fi
 fi
 
 echo "&name;: install complete"

@@ -22,6 +22,11 @@ cp -a "$PLUGIN_DIR/." "$INSTALL_ROOT/"
 
 chmod +x "$INSTALL_ROOT/scripts/rc.dormouse" "$INSTALL_ROOT/scripts/dormoused"
 
+# emhttpd gates event/* scripts on the executable bit itself (not -f, unlike
+# every script our own .plg invokes directly) — a documented exception to
+# CLAUDE.md rule 4.
+chmod +x "$INSTALL_ROOT/event/started" "$INSTALL_ROOT/event/stopping_svcs"
+
 mkdir -p "$OUT_DIR"
 TXZ="$OUT_DIR/$NAME-$VERSION.txz"
 rm -f "$TXZ"

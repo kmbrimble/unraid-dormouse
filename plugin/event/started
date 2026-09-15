@@ -1,0 +1,11 @@
+#!/bin/bash
+# emhttpd fires this at the end of cmdStart, once the array and cache pool
+# are mounted (confirmed via /usr/local/sbin/emhttp_event on the host and by
+# matching the hooks shipped by file.activity, unbalanced and
+# tips.and.tweaks, which start their own daemons from this same event). This
+# is the real startup signal dormoused needs: the .plg's install step only
+# starts it immediately when the array is already up (see array-ready.sh) —
+# on a boot-time install this hook is what actually starts it, once it's
+# safe to. emhttpd gates event/* scripts on the executable bit, not -f — see
+# CLAUDE.md rule 4's documented exception.
+bash "$(cd "$(dirname "$0")/.." && pwd)/scripts/rc.dormouse" start

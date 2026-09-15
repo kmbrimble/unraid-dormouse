@@ -96,10 +96,36 @@ function dormouse_drain_inotify(array &$child): ?array
     return $lines;
 }
 
+$config = dormouse_load_config($cfgFile);
+
+// Refuse to run at all if the mount holding db_path (cache_root) or
+// pool_root isn't a real mountpoint yet — a boot-time invocation before the
+// pools mount would otherwise create manifest.db on the RAM rootfs,
+// silently covered by the later real mount and lost at shutdown (CLAUDE.md
+// boot-order facts, verified 2026-09-15). This should never actually
+// trigger in production now that the plg only starts dormoused via the
+// `started` event hook or an already-array-started install, but it stays
+// as the last line of defence. getenv() returns false, not null, when
+// unset — normalised here rather than via `?:`, since that would turn an
+// explicit "0" override into the unset case.
+$assumeCacheMounted = getenv('DORMOUSE_ASSUME_CACHE_MOUNTED');
+$assumePoolMounted = getenv('DORMOUSE_ASSUME_POOL_MOUNTED');
+$cacheMounted = dormouse_resolve_mounted($assumeCacheMounted === false ? null : $assumeCacheMounted, $config['cache_root']);
+$poolMounted = dormouse_resolve_mounted($assumePoolMounted === false ? null : $assumePoolMounted, $config['pool_root']);
+if (!$cacheMounted || !$poolMounted) {
+    dormouse_log($logFile, sprintf(
+        "ERROR: refusing to start — cache_root=%s mounted=%s, pool_root=%s mounted=%s. Will start via the 'started' event hook once the array is up.",
+        $config['cache_root'],
+        $cacheMounted ? 'yes' : 'no',
+        $config['pool_root'],
+        $poolMounted ? 'yes' : 'no'
+    ));
+    exit(1);
+}
+
 file_put_contents($pidFile, getmypid() . PHP_EOL);
 dormouse_log($logFile, 'dormoused started (pid ' . getmypid() . ')');
 
-$config = dormouse_load_config($cfgFile);
 $db = dormouse_open_db($config['db_path']);
 
 $running = true;
