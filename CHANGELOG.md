@@ -10,23 +10,54 @@ zero-padded, because Unraid's plugin manager compares versions with a plain
 
 ## [Unreleased]
 
-### Plan — Source D: ZFS-level I/O attribution (0.2.2)
+## [0.2.2] - 2026-09-15
 
-The 0.2.1 spin log shows spin-ups with no activity in any watched share:
-inotify only sees opens under watched roots, so ZFS-internal I/O (metadata,
-snapshots, scrubs, the root dataset, any unwatched share) is invisible.
-`/proc/spl/kstat/zfs/<pool>/objset-0x*` (per-dataset reads/writes/bytes) and
-`/proc/diskstats` (per-device) are read on the existing 15s tick — reading
-kstats never touches the pool. Deltas since the previous tick are computed;
-rows are written to a new `zfs_io` table only when a delta is non-zero (or a
-reset, recorded as NULL); first sight of a dataset/device is a silent
-baseline. `spin_events` in the API gain a `zfs_window` (±60s delta sums) and
-the API/page gain a `zfs_24h` per-dataset summary. Still Phase 2 — no moves.
-Files: `plugin/scripts/lib.php` (parsing, schema, tick, aggregation),
-`plugin/scripts/dormoused` (poll integration), `plugin/scripts/dormouse-api.php`
-(no change needed — status already flows through `dormouse_build_status`),
-`plugin/Dormouse.page` (ZFS table + zfs_window rendering), `tests/run.php`
-(new fixtures + coverage), `dormouse.plg`/`README.md` (version 0.2.2).
+### Added
+
+- Source D: `dormoused` reads every `/proc/spl/kstat/zfs/<pool>/objset-0x*`
+  file and `/proc/diskstats` on its existing 15s tick — never `zpool`/`zfs`
+  commands, never a path under `/mnt/snowflake` — via new
+  `dormouse_parse_objset_file()`/`dormouse_parse_diskstats()`/
+  `dormouse_zfs_device_stats()` in `lib.php`. Fixtures under
+  `tests/fixtures/objset-*` and `tests/fixtures/diskstats` copy the exact
+  line structure of a live, read-only `ssh cat` of the root dataset,
+  `Filing Cabinet` (space in the name), `Content`, and `/proc/diskstats`
+  (2026-09-15).
+- Deltas since the previous tick are computed per dataset and per device
+  (`dormouse_zfs_poll_tick()`) and written to a new `zfs_io` table only when
+  at least one field's delta is non-zero or a reset (NULL, reusing Source
+  C's `dormouse_disk_delta()` reset rule) — first sight of a dataset/device
+  is a silent baseline, no row. Device byte counts convert diskstats sectors
+  to bytes (×512). Trimmed by the same `activity_retain_days` job as
+  `activity`, via `dormouse_trim_zfs_io()`. `stats` key `zfs_last_poll_ts`
+  advances every tick regardless of whether a row was written.
+- `dormouse_build_spin_events()`'s entries gain `zfs_window`: per-dataset/
+  per-device delta sums over the same ±60s window already used for the
+  `before`/`after` activity rows — a spin-up with zero watched-share
+  activity now shows the ZFS-internal I/O (root dataset, snapshots,
+  unwatched shares) that actually caused it. `dormouse_build_status()` gains
+  `zfs_24h`, a per-dataset 24h summary. Both aggregation queries preserve a
+  `NULL` from a summed counter reset rather than letting SQLite's `SUM()`
+  turn it into a silent `0` (`dormouse_zfs_sum_or_null()`).
+- `Dormouse.page` gains a "ZFS I/O — last 24h by dataset" table and renders
+  each spin event's `zfs_window`, with a `humanBytes()` formatter; every
+  interpolated value (including formatted-byte strings) goes through the
+  existing `esc()` convention before `innerHTML`.
+- Config: `zfs_pool_name` (default `snowflake`) and `zfs_kstat_dir` (default
+  `/proc/spl/kstat/zfs`, overridable for tests) — both cfg keys like
+  `pool_disk_prefix`, not env vars. Deliberately independent of
+  `pool_disk_prefix` rather than derived from it: `pool_disk_prefix` filters
+  `disks.ini` section names, `zfs_pool_name` names a kstat directory — the
+  same value by convention on this host, not by a coupling the code
+  enforces. Revisit if a future host ever needs them to differ.
+- `stats` key `zfs_dataset_count` (datasets found this tick) is surfaced next
+  to `zfs_last_poll_ts` on the settings page, so a wrong `zfs_pool_name`/
+  `zfs_kstat_dir` or an empty glob is visible as "0 datasets tracked" rather
+  than installing cleanly and silently watching nothing — the same failure
+  class as the fanotify finding this project already documents.
+- Still Phase 2 — no moves; the existing no-move grep test stays green (and
+  caught a literal "zpool" in a comment during development, confirming it's
+  live, not decorative).
 
 ## [0.2.1] - 2026-09-14
 

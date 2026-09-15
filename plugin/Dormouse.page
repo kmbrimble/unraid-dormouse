@@ -40,10 +40,14 @@ function humanBytes(n) {
     return n.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
 }
 
+function orDash(n) {
+    return n === null || n === undefined ? '—' : n;
+}
+
 function renderZfsWindow(rows) {
     if (!rows || !rows.length) { return '(no ZFS I/O in this window)'; }
     return rows.map(function (r) {
-        return esc(r.name) + ' (' + esc(r.kind) + '): ' + esc(r.reads) + ' reads, ' + humanBytes(r.nread);
+        return esc(r.name) + ' (' + esc(r.kind) + '): ' + esc(orDash(r.reads)) + ' reads, ' + esc(humanBytes(r.nread));
     }).join('<br>');
 }
 
@@ -83,11 +87,14 @@ function dormouseRender(data) {
     });
     html += '</table>';
 
-    html += '<h3>ZFS I/O — last 24h by dataset</h3><table border="1" cellpadding="4"><tr><th>Dataset</th><th>Reads</th><th>Read</th><th>Writes</th><th>Written</th><th>Unlinks</th></tr>';
+    html += '<h3>ZFS I/O — last 24h by dataset</h3>';
+    html += '<p>Datasets tracked: ' + esc(data.zfs_dataset_count) + ' — last poll: ' +
+        (data.zfs_last_poll_ts ? esc(new Date(data.zfs_last_poll_ts * 1000).toLocaleString()) : 'never') + '</p>';
+    html += '<table border="1" cellpadding="4"><tr><th>Dataset</th><th>Reads</th><th>Read</th><th>Writes</th><th>Written</th><th>Unlinks</th></tr>';
     for (var dataset in data.zfs_24h) {
         var z = data.zfs_24h[dataset];
-        html += '<tr><td>' + esc(dataset) + '</td><td>' + esc(z.reads) + '</td><td>' + humanBytes(z.nread) +
-            '</td><td>' + esc(z.writes) + '</td><td>' + humanBytes(z.nwritten) + '</td><td>' + esc(z.unlinks) + '</td></tr>';
+        html += '<tr><td>' + esc(dataset) + '</td><td>' + esc(orDash(z.reads)) + '</td><td>' + esc(humanBytes(z.nread)) +
+            '</td><td>' + esc(orDash(z.writes)) + '</td><td>' + esc(humanBytes(z.nwritten)) + '</td><td>' + esc(orDash(z.unlinks)) + '</td></tr>';
     }
     html += '</table>';
 

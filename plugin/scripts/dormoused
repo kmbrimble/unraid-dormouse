@@ -276,6 +276,7 @@ while ($running) {
             dormouse_record_zfs_io($db, $now, $row['kind'], $row['name'], $row['reads'], $row['nread'], $row['writes'], $row['nwritten'], $row['unlinks']);
         }
         dormouse_stat_set($db, 'zfs_last_poll_ts', $now);
+        dormouse_stat_set($db, 'zfs_dataset_count', count($datasets));
         $lastZfsPoll = $now;
     }
 

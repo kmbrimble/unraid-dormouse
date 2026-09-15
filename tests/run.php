@@ -939,8 +939,28 @@ t('dormouse_zfs_window sums per-dataset and per-device deltas within [from, to)'
     assert_eq(2200, $byKindName['dataset/snowflake']['reads']);
     assert_eq(88000, $byKindName['dataset/snowflake']['nread']);
     assert_eq(300, $byKindName['device/snowflake/sdc']['reads']);
-    assert_true(!isset($byKindName['dataset/snowflake']['reads']) || $byKindName['dataset/snowflake']['reads'] !== 999 + 2200, 'row outside the window must not be included');
+    assert_eq(2, count($window), 'the row at ts=1200 falls outside [940,1000) and must not add a third group or inflate the sum');
 
+    $db->close();
+    unlink($tmp);
+    @unlink($tmp . '-wal');
+    @unlink($tmp . '-shm');
+});
+
+t('dormouse_zfs_window preserves a NULL total (every row in the bucket was a reset) instead of silently reporting 0', function () {
+    // SQLite SUM() ignores individual NULLs and only returns NULL when every
+    // summed value is NULL, so this only exercises dormouse_zfs_sum_or_null
+    // when the whole bucket reset — a partial reset alongside real rows
+    // still sums the real ones, which is correct SUM() behaviour, not a bug.
+    $tmpBase = tempnam(sys_get_temp_dir(), 'dormouse-zfswindownull-');
+    unlink($tmpBase);
+    $tmp = $tmpBase . '.sqlite';
+    $db = dormouse_open_db($tmp);
+    dormouse_record_zfs_io($db, 950, 'dataset', 'snowflake', null, null, 0, 0, 0); // a reset tick
+    $window = dormouse_zfs_window($db, 940, 1000);
+    assert_true($window[0]['reads'] === null, 'an all-NULL summed bucket must surface as NULL, never a silent 0');
+    assert_true($window[0]['nread'] === null);
+    assert_eq(0, $window[0]['writes'], 'a real (zero) field alongside the NULL one must still report its real value');
     $db->close();
     unlink($tmp);
     @unlink($tmp . '-wal');
@@ -989,17 +1009,26 @@ t('spin_events gain a zfs_window with the per-dataset/device deltas around the t
         $byName[$row['name']] = $row;
     }
     assert_eq(2201, $byName['snowflake']['reads']);
-    assert_true(!isset($byName['snowflake']) || $byName['snowflake']['reads'] !== 999, 'the row outside the window must not be summed in');
+    assert_eq(2, count($events[0]['zfs_window']), 'the row at ts=1300 falls outside the +-60s window and must not add a third entry or inflate the sum');
+
+    $db->close();
+    unlink($tmp);
+    @unlink($tmp . '-wal');
+    @unlink($tmp . '-shm');
 });
 
-t('dormouse_build_status includes a zfs_24h summary', function () {
+t('dormouse_build_status includes a zfs_24h summary and the zfs_dataset_count/zfs_last_poll_ts stats', function () {
     $tmpBase = tempnam(sys_get_temp_dir(), 'dormouse-zfsstatus-');
     unlink($tmpBase);
     $tmp = $tmpBase . '.sqlite';
     $db = dormouse_open_db($tmp);
     dormouse_record_zfs_io($db, time() - 10, 'dataset', 'snowflake/Content', 100, 1000, 10, 100, 0);
+    dormouse_stat_set($db, 'zfs_dataset_count', 11);
+    dormouse_stat_set($db, 'zfs_last_poll_ts', 1234);
     $status = dormouse_build_status($db, dormouse_default_config(), '/nonexistent');
     assert_true(isset($status['zfs_24h']['snowflake/Content']));
+    assert_eq(11, $status['zfs_dataset_count']);
+    assert_eq(1234, $status['zfs_last_poll_ts']);
     $db->close();
     unlink($tmp);
     @unlink($tmp . '-wal');

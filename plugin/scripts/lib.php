@@ -260,6 +260,7 @@ function dormouse_build_status(SQLite3 $db, array $config, string $pidFile): arr
         'disk_states' => dormouse_build_disk_states($db),
         'spin_events' => dormouse_build_spin_events($db),
         'zfs_last_poll_ts' => dormouse_stat_get($db, 'zfs_last_poll_ts'),
+        'zfs_dataset_count' => dormouse_stat_get($db, 'zfs_dataset_count'),
         'zfs_24h' => dormouse_zfs_24h($db),
     ];
 }
@@ -923,14 +924,26 @@ function dormouse_zfs_window(SQLite3 $db, int $fromTs, int $toTs): array
         $out[] = [
             'kind' => $row['kind'],
             'name' => $row['name'],
-            'reads' => (int) $row['reads'],
-            'nread' => (int) $row['nread'],
-            'writes' => (int) $row['writes'],
-            'nwritten' => (int) $row['nwritten'],
-            'unlinks' => $row['unlinks'] !== null ? (int) $row['unlinks'] : null,
+            'reads' => dormouse_zfs_sum_or_null($row['reads']),
+            'nread' => dormouse_zfs_sum_or_null($row['nread']),
+            'writes' => dormouse_zfs_sum_or_null($row['writes']),
+            'nwritten' => dormouse_zfs_sum_or_null($row['nwritten']),
+            'unlinks' => dormouse_zfs_sum_or_null($row['unlinks']),
         ];
     }
     return $out;
+}
+
+/**
+ * SQLite SUM() over a column containing a NULL (a counter reset mid-window,
+ * per-row via dormouse_disk_delta()) returns NULL for the whole aggregate —
+ * cast straight to (int) would silently turn that into 0, indistinguishable
+ * from "no I/O happened" and burying the exact signal a reset is meant to
+ * surface. Preserve the NULL instead.
+ */
+function dormouse_zfs_sum_or_null($value): ?int
+{
+    return $value !== null ? (int) $value : null;
 }
 
 /** Per-dataset I/O totals over the last 24h, keyed by dataset name. */
@@ -946,11 +959,11 @@ function dormouse_zfs_24h(SQLite3 $db, ?int $nowTs = null): array
     $out = [];
     while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
         $out[$row['name']] = [
-            'reads' => (int) $row['reads'],
-            'nread' => (int) $row['nread'],
-            'writes' => (int) $row['writes'],
-            'nwritten' => (int) $row['nwritten'],
-            'unlinks' => (int) $row['unlinks'],
+            'reads' => dormouse_zfs_sum_or_null($row['reads']),
+            'nread' => dormouse_zfs_sum_or_null($row['nread']),
+            'writes' => dormouse_zfs_sum_or_null($row['writes']),
+            'nwritten' => dormouse_zfs_sum_or_null($row['nwritten']),
+            'unlinks' => dormouse_zfs_sum_or_null($row['unlinks']),
         ];
     }
     return $out;

@@ -190,7 +190,11 @@ before the daemon has started against an existing 0.2.0-shaped db, a poll of
 the API endpoint hits a `no such column` exception on `reads_delta`, which
 its existing try/catch turns into a generic "manifest database unavailable"
 JSON response rather than a crash — never assume the api endpoint migrates
-anything itself.
+anything itself. The same applies to `zfs_io` (0.2.2): a pre-0.2.2 db has no
+such table at all, so `dormouse_build_status()`'s call into
+`dormouse_zfs_24h()` throws `no such table: zfs_io` in that same brief
+upgrade window, caught by the same try/catch, same generic error — not a
+separate gap to fix.
 
 One deviation from the PLAN.md §4 `activity` shape: a `count` column, needed
 because inotify `ACCESS` events are coalesced (at most one row per file per
@@ -279,8 +283,12 @@ don't watch — is invisible to Sources A/B. The kernel's own ZFS counters see
 everything, and reading them never touches the disks.
 
 Verified on the host, 15 Sep 2026 (do not re-derive; the fixtures under
-`tests/fixtures/objset-*` and `tests/fixtures/diskstats` are sanitised
-re-captures of these exact shapes, not invented):
+`tests/fixtures/objset-*` and `tests/fixtures/diskstats` copy the exact
+line structure, column headers, field order and field widths of a live
+`ssh cat` of `/proc/spl/kstat/zfs/snowflake/objset-0x36` (root),
+`objset-0x2d7` (`Filing Cabinet`), `objset-0x247` (`Content`), and
+`/proc/diskstats` — read-only, no write. Only the numeric magnitudes are
+replaced with distinguishable test values; the shape is real, not guessed):
 
 - **`/proc/spl/kstat/zfs/<pool>/objset-0x*`** — one file per dataset: a
   numeric header line, a `name type data` column-header line, then rows

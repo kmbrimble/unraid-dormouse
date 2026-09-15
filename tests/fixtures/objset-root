@@ -1,4 +1,4 @@
-6 1 0x01 8 240 123456789 987654321
+136 1 0x01 28 7872 242521460697 284599637295230
 name                            type data
 dataset_name                    7    snowflake
 writes                          4    12345
@@ -7,5 +7,6 @@ reads                           4    2201
 nread                           4    92200000
 nunlinks                        4    3
 nunlinked                       4    2
-zil_commit_count                4    0
-zil_commit_writer_count         4    0
+zil_commit_count                4    1
+zil_commit_writer_count         4    1
+zil_commit_error_count          4    0

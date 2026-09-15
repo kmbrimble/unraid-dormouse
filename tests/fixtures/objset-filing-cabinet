@@ -1,4 +1,4 @@
-6 1 0x01 8 240 123456789 987654323
+139 1 0x01 28 7872 243226643547 284599637795477
 name                            type data
 dataset_name                    7    snowflake/Filing Cabinet
 writes                          4    40
@@ -7,4 +7,6 @@ reads                           4    12
 nread                           4    409600
 nunlinks                        4    1
 nunlinked                       4    1
-zil_commit_count                4    0
+zil_commit_count                4    1
+zil_commit_writer_count         4    1
+zil_commit_error_count          4    0
