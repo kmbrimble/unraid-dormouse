@@ -98,25 +98,28 @@ function dormouse_drain_inotify(array &$child): ?array
 
 $config = dormouse_load_config($cfgFile);
 
-// Refuse to run at all if the mount holding db_path (cache_root) or
-// pool_root isn't a real mountpoint yet — a boot-time invocation before the
-// pools mount would otherwise create manifest.db on the RAM rootfs,
-// silently covered by the later real mount and lost at shutdown (CLAUDE.md
-// boot-order facts, verified 2026-09-15). This should never actually
-// trigger in production now that the plg only starts dormoused via the
-// `started` event hook or an already-array-started install, but it stays
-// as the last line of defence. getenv() returns false, not null, when
-// unset — normalised here rather than via `?:`, since that would turn an
-// explicit "0" override into the unset case.
+// Refuse to run at all if the mount holding db_path, or pool_root, isn't a
+// real mountpoint yet — a boot-time invocation before the pools mount would
+// otherwise create manifest.db on the RAM rootfs, silently covered by the
+// later real mount and lost at shutdown (CLAUDE.md boot-order facts,
+// verified 2026-09-15). The db_path check resolves the directory that
+// would actually hold it (dormouse_mount_root_for()), rather than assuming
+// it lives under cache_root — db_path is an independently configurable
+// key. This should never actually trigger in production now that the plg
+// only starts dormoused via the `started` event hook or an
+// already-array-started install, but it stays as the last line of defence.
+// getenv() returns false, not null, when unset — normalised here rather
+// than via `?:`, since that would turn an explicit "0" override into the
+// unset case.
 $assumeCacheMounted = getenv('DORMOUSE_ASSUME_CACHE_MOUNTED');
 $assumePoolMounted = getenv('DORMOUSE_ASSUME_POOL_MOUNTED');
-$cacheMounted = dormouse_resolve_mounted($assumeCacheMounted === false ? null : $assumeCacheMounted, $config['cache_root']);
+$dbMounted = dormouse_db_path_mounted($assumeCacheMounted === false ? null : $assumeCacheMounted, $config['db_path']);
 $poolMounted = dormouse_resolve_mounted($assumePoolMounted === false ? null : $assumePoolMounted, $config['pool_root']);
-if (!$cacheMounted || !$poolMounted) {
+if (!$dbMounted || !$poolMounted) {
     dormouse_log($logFile, sprintf(
-        "ERROR: refusing to start — cache_root=%s mounted=%s, pool_root=%s mounted=%s. Will start via the 'started' event hook once the array is up.",
-        $config['cache_root'],
-        $cacheMounted ? 'yes' : 'no',
+        "ERROR: refusing to start — db_path=%s mounted=%s, pool_root=%s mounted=%s. Will start via the 'started' event hook once the array is up.",
+        $config['db_path'],
+        $dbMounted ? 'yes' : 'no',
         $config['pool_root'],
         $poolMounted ? 'yes' : 'no'
     ));

@@ -394,6 +394,49 @@ t('array-ready.sh derives cache_root/pool_root from dormouse.cfg, not a hardcode
     assert_true(str_contains($src, 'pool_root'), 'array-ready.sh must read pool_root from cfg');
 });
 
+t('install block wraps the array-ready.sh call in an if condition, so its expected non-zero exit does not abort the install script under set -e', function () use ($plgRaw) {
+    assert_true(
+        (bool) preg_match('/if bash &emhttp;\/scripts\/array-ready\.sh; then/', $plgRaw),
+        'array-ready.sh must be the condition of an if statement, not a bare statement — a bare non-zero exit aborts the install under set -e, defeating the exact boot-time case this release exists to handle'
+    );
+});
+
+t('the if-CMD-then/else pattern used for array-ready.sh survives set -e when CMD fails (regression for the bare-statement bug)', function () {
+    $out = [];
+    $exit = null;
+    exec("bash -c 'set -e; READY=1; if false; then READY=0; else READY=1; fi; echo reached; echo \$READY'", $out, $exit);
+    assert_eq(0, $exit, 'the wrapped pattern must not abort the script');
+    assert_eq(['reached', '1'], $out);
+});
+
+t('dormouse_mount_root_for walks up to the nearest real mountpoint, defaulting to / when nothing else is mounted', function () {
+    assert_eq('/', dormouse_mount_root_for('/nonexistent/deeply/nested/path/manifest.db'));
+    assert_eq('/', dormouse_mount_root_for('/'));
+});
+
+t('dormouse_mount_root_for works for a target that does not exist yet, by walking up to an existing ancestor first', function () {
+    $tmp = sys_get_temp_dir() . '/dormouse-mountroot-' . uniqid();
+    // Neither $tmp nor its subdirs exist — dormouse_open_db() would mkdir
+    // them, which is exactly what the guard must check before that happens.
+    $root = dormouse_mount_root_for($tmp . '/appdata/dormouse/manifest.db');
+    assert_true($root !== '', 'must resolve to some ancestor rather than erroring');
+    assert_true(!is_dir($tmp), 'must never create the directory while merely resolving its mount root');
+});
+
+t('dormouse_db_path_mounted: real check reports false when db_path resolves only to the rootfs', function () {
+    assert_true(!dormouse_db_path_mounted(null, '/nonexistent/deeply/nested/path/manifest.db'));
+});
+
+t('dormouse_db_path_mounted: override "1"/"0" bypasses the real check in both directions', function () {
+    assert_true(dormouse_db_path_mounted('1', '/nonexistent/deeply/nested/path/manifest.db'));
+    assert_true(!dormouse_db_path_mounted('0', '/'));
+});
+
+t("dormoused's mount guard resolves db_path's real mount root, not merely cache_root, so a db_path outside cache_root can't bypass it", function () use ($repoRoot) {
+    $src = file_get_contents($repoRoot . '/plugin/scripts/dormoused');
+    assert_true(str_contains($src, 'dormouse_db_path_mounted'), 'guard must check the mount actually holding db_path via dormouse_db_path_mounted()');
+});
+
 t('dormouse.plg install block consults array-ready.sh before starting the daemon', function () use ($plgRaw) {
     assert_true(str_contains($plgRaw, 'array-ready.sh'), 'install block must consult array-ready.sh');
     $readyPos = strpos($plgRaw, 'array-ready.sh');

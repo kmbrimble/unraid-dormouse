@@ -97,6 +97,55 @@ function dormouse_resolve_mounted(?string $override, string $dir): bool
     return dormouse_is_mountpoint($dir);
 }
 
+/**
+ * Finds the real mount root that $path would actually be written under,
+ * without assuming it lives under cache_root — db_path is an independent
+ * config key, and `mountpoint -q` only ever returns true for the exact
+ * mount root, never a subdirectory of one, so it can't be checked directly
+ * against dirname($path). Walks up to the nearest existing ancestor (the
+ * target need not exist yet), then further up until a real mountpoint is
+ * found. Returns '/' if nothing but the rootfs is found — the "not
+ * actually mounted yet" case this guard exists to catch.
+ */
+function dormouse_mount_root_for(string $path): string
+{
+    $dir = $path;
+    while (!is_dir($dir)) {
+        $parent = dirname($dir);
+        if ($parent === $dir) {
+            return '/';
+        }
+        $dir = $parent;
+    }
+    while ($dir !== '/' && $dir !== '.') {
+        if (dormouse_is_mountpoint($dir)) {
+            return $dir;
+        }
+        $parent = dirname($dir);
+        if ($parent === $dir) {
+            break;
+        }
+        $dir = $parent;
+    }
+    return '/';
+}
+
+/**
+ * Whether $dbPath's directory is actually on a mounted filesystem (not
+ * merely the rootfs), honouring the same env-override convention as
+ * dormouse_resolve_mounted(). Deliberately not routed through
+ * dormouse_resolve_mounted() itself: dormouse_mount_root_for() returning
+ * '/' means "nothing else mounted", and re-checking `mountpoint -q /` would
+ * wrongly report that as mounted (the root filesystem is always mounted).
+ */
+function dormouse_db_path_mounted(?string $override, string $dbPath): bool
+{
+    if ($override !== null) {
+        return $override === '1';
+    }
+    return dormouse_mount_root_for(dirname($dbPath)) !== '/';
+}
+
 // --- Manifest db -------------------------------------------------------------
 
 function dormouse_open_db(string $dbPath): SQLite3

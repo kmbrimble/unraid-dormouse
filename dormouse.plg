@@ -128,10 +128,19 @@ fi
 # is already up (a mid-session install/upgrade); a boot-time install defers
 # to the `started` event hook, which fires once the array and cache are
 # actually ready. See array-ready.sh.
+# The install block runs under `set -e`, so array-ready.sh's expected
+# non-zero exit (the whole point of this check, on the exact boot-time
+# scenario this release exists to handle) must be consumed by an `if`
+# condition, never left as a bare statement — a bare statement's failure
+# would abort the install script before it ever reaches the "defer to the
+# started hook" branch below.
 READY=1
 if [[ -f &emhttp;/scripts/array-ready.sh ]]; then
-  bash &emhttp;/scripts/array-ready.sh
-  READY=$?
+  if bash &emhttp;/scripts/array-ready.sh; then
+    READY=0
+  else
+    READY=1
+  fi
 fi
 if [[ -f &emhttp;/scripts/rc.dormouse ]]; then
   if [[ "$READY" -eq 0 ]]; then
