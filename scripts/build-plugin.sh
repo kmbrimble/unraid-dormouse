@@ -31,7 +31,10 @@ mkdir -p "$OUT_DIR"
 TXZ="$OUT_DIR/$NAME-$VERSION.txz"
 rm -f "$TXZ"
 
-tar -C "$WORK_DIR" --owner=0 --group=0 -cJf "$TXZ" usr
+# Deterministic archive: sorted names, fixed mtime, numeric owner. The same source must give the same
+# bytes on the Gitea runner and on the GitHub runner, because the .plg's <MD5> is committed before the
+# tag and the GitHub release workflow rebuilds and requires it to match (scripts/check-md5.sh).
+tar -C "$WORK_DIR" --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner -cJf "$TXZ" usr
 
 MD5="$(md5sum "$TXZ" | awk '{print $1}')"
 

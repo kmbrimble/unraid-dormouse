@@ -1,0 +1,46 @@
+name: CI
+
+# Gitea is the primary forge (GitHub is a read-only push mirror). This is the required status check on main.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    # The rc.dormouse tests start, stop and SIGKILL real processes and ask `kill -0` whether they are gone. In a
+    # job container whose PID 1 never reaps children, a killed process stays a zombie and still answers kill -0,
+    # so those tests fail. --init puts a reaper at PID 1 (GitHub's VM runners have systemd).
+    container:
+      image: docker.gitea.com/runner-images:ubuntu-latest
+      options: --init
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          fetch-depth: 0   # tags are needed by the release-readiness check below
+
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962  # v2
+        with:
+          php-version: "8.4"
+          extensions: json, sqlite3, pcntl, posix
+
+      - name: Lint PHP
+        run: |
+          find plugin scripts tests -name '*.php' -print0 | xargs -0 -n1 php -l
+          php -l plugin/scripts/dormoused
+
+      - name: Run tests
+        run: php tests/run.php
+
+      # A version that is not tagged yet is a release in the making: its .plg must already carry the final md5
+      # (nothing writes it back after the tag any more), and the build must be reproducible.
+      - name: Release readiness (untagged version must carry the final md5)
+        run: |
+          set -euo pipefail
+          VERSION=$(sed -rn 's|^<!ENTITY version[[:space:]]+"([^"]+)">.*|\1|p' dormouse.plg)
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "v$VERSION is already tagged: nothing to check."
+          else
+            bash scripts/check-md5.sh "$VERSION"
+          fi

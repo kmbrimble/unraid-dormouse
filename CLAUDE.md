@@ -6,6 +6,27 @@ file is derived from it and from the repo as it stands — if the two conflict,
 re-derive this file from the current repo state, not from memory of an earlier
 plan.
 
+## Forge and releases (changed 2 Nov 2026)
+
+**Gitea is primary; GitHub is a read-only push mirror.** Develop against `https://git.kiztigs.com/kmbrimble/unraid-dormouse`
+(`origin`, via the gt credential helper; use `gt`, not `gh`, for issues/PRs). `github.com/kmbrimble/unraid-dormouse` receives every
+push to Gitea within about a minute (`sync_on_commit`, plus an 8-hourly sweep) and **must never be pushed to directly**: the mirror
+force-syncs and prunes refs, so anything that exists only on GitHub is lost. GitHub has Issues, Wiki, Projects, Discussions and PRs
+switched off. The `.plg` URLs (`raw.githubusercontent.com/.../main/dormouse.plg` and the GitHub release assets) deliberately still
+point at GitHub, which is where installed servers fetch from.
+
+- `main` is protected on Gitea: changes go through a PR, the Gitea CI check (`CI / lint-and-test`) must be green, and butler-bot
+  merges its own green PRs (no human approval).
+- CI lives in `.gitea/workflows/ci.yml` (the Gitea runner reads that directory only). It includes a **release-readiness** step:
+  if `&version;` in `dormouse.plg` has no `v<version>` tag yet, the build must be reproducible and `&md5;` must already equal its md5.
+- **How to release:** in the PR that bumps `&version;` (and adds the `###<version>` CHANGES entry and the CHANGELOG), also set `&md5;`.
+  Get the value from CI: the release-readiness step fails with `set &md5; to <value>` on the first run, so push again with that
+  value. Merge the PR, then tag the merge commit on Gitea (`git tag v<version> && git push origin v<version>`). The tag is mirrored;
+  `.github/workflows/release.yml` on GitHub then rebuilds, requires the same md5, and publishes the GitHub Release with the `.txz`.
+  Nothing writes back to the repo after the tag. See the `forge-release` skill.
+- `release.yml` is also dispatchable by hand on GitHub as a **dry run** (builds and prints the md5, publishes nothing).
+- The first real release on this layout is the final proof of the tag path; it had not happened when this section was written.
+
 ## Non-negotiable constraints
 
 Hard-won from SecretsMan and NetMan. Not optional, not footnotes.
@@ -126,12 +147,12 @@ Hard-won from SecretsMan and NetMan. Not optional, not footnotes.
 ### Release requirements (every build)
 
 - `.plg` published as a GitHub Release with the `.txz` attached and the real
-  `<MD5>` written onto the FILE block.
+  `<MD5>` written onto the FILE block (committed in the version-bump PR, see "Forge and releases").
 - `CHANGELOG.md` updated (Keep a Changelog format).
 - `README.md` (repo) and `plugin/README.md` (stock one-liner) both current.
 - `CLAUDE.md` current — derived from the repo, never invented; cite verification
   method and date inline.
-- Releases are cut automatically on merge to `main` — no asking before shipping.
+- Releases are cut without asking: merge the PR, then tag it on Gitea (see "Forge and releases"). No automatic release on merge any more.
 - Pre-push secrets scan: a broad pass across tracked files, then a targeted pass
   on new files for serials, IPMI credentials, IPs, keys. (The host IP and ssh key
   path in `scripts/*-on-host.sh` are the same pattern the public secretsman repo
@@ -191,7 +212,7 @@ build plan for the exact commands used):
   that need `python3` (the strcmp version check in
   `scripts/install-on-host.sh`) run in *this development container*, which has
   `python3`, not on the host. The release workflow's strcmp guard runs on the
-  GitHub-hosted runner, which has PHP, via `scripts/version-sorts-after.php`.
+  GitHub-hosted runner (and CI on the Gitea runner), which have PHP, via `scripts/version-sorts-after.php`.
 
 ## Dev-environment fact: this container runs ON the live host
 
@@ -206,7 +227,7 @@ shared (the container still has its own PID namespace). Two consequences:
 - `docker run` here starts a real container on the production NAS. Don't reach
   for a throwaway image (e.g. a PHP image) to get missing local tooling — this
   container has no PHP and no `xz`; leave PHP tests and the `.txz` build to CI,
-  which runs on an isolated GitHub-hosted runner. (A global PreToolUse hook
+  which runs on the isolated Gitea runner VM (and the tag release on a GitHub-hosted runner). (A global PreToolUse hook
   only auto-allows `docker rm`/`docker stop` on `smoketest-` prefixed names.)
 - Any `pgrep -f` (or similar) run against this host will match THIS agent
   session's own process if the pattern is a substring of the task prompt —
@@ -239,8 +260,9 @@ scripts/
   version-sorts-after.php       strcmp version guard, shared by release.yml and tests
 tests/run.php                   hand-rolled PHP assert runner
 tests/fixtures/smbstatus.json   synthetic smbstatus -j JSON (RFC 5737 IPs, fake titles)
-.github/workflows/ci.yml        lint + test on push/PR
-.github/workflows/release.yml   version guard, build, tag, GitHub Release on push to main
+scripts/check-md5.sh            build + require the .plg &md5; to match (CI and release)
+.gitea/workflows/ci.yml         lint + test + release-readiness on push/PR (Gitea runner)
+.github/workflows/release.yml   on a mirrored v* tag: version guard, rebuild, md5 check, GitHub Release (dry run via dispatch)
 ```
 
 ## The `activity` table (Phase 2)
@@ -448,8 +470,8 @@ php tests/run.php
 2. `scripts/uninstall-on-host.sh` — removes and asserts a clean revert: no
    flash `.plg`, no flash plugin dir, no installed tree, no plugin-manager
    registration, no daemon process, no pid file, no package entry.
-3. Watch the release workflow with `gh run list` / `gh run watch <id>
-   --exit-status` after every push to `main`.
+3. After tagging, watch the GitHub release workflow with `gh run list -R kmbrimble/unraid-dormouse` / `gh run watch <id>
+   --exit-status` (a read on GitHub, allowed). CI for PRs is on Gitea: `gt run list -R kmbrimble/unraid-dormouse`.
 
 ## Phase roadmap
 

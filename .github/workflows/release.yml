@@ -1,64 +1,63 @@
 name: Release
 
+# This repository is a READ-ONLY MIRROR of the primary repo on a private forge (Gitea). Never push here directly:
+# the mirror force-syncs from the primary and would discard anything that exists only on GitHub.
+#
+# A release is a v* tag pushed to the primary and mirrored here. This workflow then rebuilds the package from
+# the tagged source (the build is deterministic), requires the committed .plg &md5; to equal the rebuilt md5,
+# and publishes the GitHub Release with the .txz attached. It does NOT commit, push or tag anything.
+#
+# workflow_dispatch is a dry run: it builds and prints the md5 and publishes nothing, so the build can be
+# compared with the primary's CI without cutting a release.
+
 on:
   push:
-    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
-  check:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      should_release: ${{ steps.tag.outputs.should_release }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Extract version from dormouse.plg
-        id: version
-        run: |
-          VERSION=$(sed -rn 's|^<!ENTITY version[[:space:]]+"([^"]+)">.*|\1|p' dormouse.plg)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Check if this version is already tagged
-        id: tag
-        run: |
-          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
-          fi
-
   release:
-    needs: check
-    if: needs.check.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     env:
-      VERSION: ${{ needs.check.outputs.version }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           fetch-depth: 0
 
-      - uses: shivammathur/setup-php@v2
-        with:
-          php-version: "8.4"
-          extensions: json, sqlite3, pcntl, posix
+      - name: Work out the version
+        run: |
+          set -euo pipefail
+          PLG_VERSION=$(sed -rn 's|^<!ENTITY version[[:space:]]+"([^"]+)">.*|\1|p' dormouse.plg)
+          [ -n "$PLG_VERSION" ] || { echo "::error::could not read &version; from dormouse.plg"; exit 1; }
+          if [ "$DRY_RUN" = "true" ]; then
+            VERSION="$PLG_VERSION"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+            [ "$VERSION" = "$PLG_VERSION" ] || { echo "::error::tag $GITHUB_REF_NAME does not match dormouse.plg &version; $PLG_VERSION"; exit 1; }
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Require a CHANGES entry for this version
         run: grep -qx "###$VERSION" dormouse.plg
 
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962  # v2
+        with:
+          php-version: "8.4"
+          extensions: json, sqlite3, pcntl, posix
+
       - name: Version-sort guard (strcmp, matching dynamix.plugin.manager)
         run: |
-          PREV_TAG=$(git tag --list 'v*' | sort -V | tail -n1)
+          PREV_TAG=$(git tag --list 'v*' | grep -vx "v$VERSION" | sort -V | tail -n1 || true)
           if [[ -n "$PREV_TAG" ]]; then
-            PREV_VERSION="${PREV_TAG#v}"
-            php scripts/version-sorts-after.php "$PREV_VERSION" "$VERSION"
+            php scripts/version-sorts-after.php "${PREV_TAG#v}" "$VERSION"
           fi
 
       - name: Lint
@@ -69,36 +68,24 @@ jobs:
       - name: Test
         run: php tests/run.php
 
-      - name: Build package
-        id: build
-        run: |
-          bash scripts/build-plugin.sh "$VERSION"
-          MD5=$(md5sum "dist/dormouse-$VERSION.txz" | awk '{print $1}')
-          echo "md5=$MD5" >> "$GITHUB_OUTPUT"
+      - name: Dry run - report the md5 of this build
+        if: env.DRY_RUN == 'true'
+        run: bash scripts/check-md5.sh "$VERSION" --report-only
 
-      - name: Write real md5 into dormouse.plg
-        run: |
-          sed -ri "s|(<!ENTITY md5 *\")[^\"]*(\">)|\1${{ steps.build.outputs.md5 }}\2|" dormouse.plg
-          grep -q "${{ steps.build.outputs.md5 }}" dormouse.plg
+      - name: Rebuild and require the committed md5 to match
+        if: env.DRY_RUN != 'true'
+        run: bash scripts/check-md5.sh "$VERSION"
 
-      - name: Commit md5 update
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add dormouse.plg
-          git commit -m "release: write md5 for v$VERSION"
-          git push origin HEAD:main
-
-      - name: Tag
-        run: |
-          git tag "v$VERSION"
-          git push origin "v$VERSION"
-
-      - name: Create GitHub Release
+      - name: Publish the GitHub Release
+        if: env.DRY_RUN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v$VERSION" \
-            "dist/dormouse-$VERSION.txz" \
+          set -euo pipefail
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "Release v$VERSION already exists - nothing to do."
+            exit 0
+          fi
+          gh release create "v$VERSION" "dist/dormouse-$VERSION.txz" \
             --title "v$VERSION" \
             --notes "See CHANGELOG.md"
