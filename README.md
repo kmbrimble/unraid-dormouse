@@ -1,5 +1,7 @@
 # Dormouse
 
+> Development happens on a private forge; this repository is a read-only mirror. Releases are published here.
+
 *"Keeps your disks asleep."*
 
 Hot-file tiering for Unraid: detect sustained reads on slow storage, pull the
