@@ -10,6 +10,11 @@ $passed = 0;
 function t(string $name, callable $fn): void
 {
     global $failures, $passed;
+    // DORMOUSE_TEST_FILTER=<substring> runs only matching tests: the full suite starts and kills real processes,
+    // which on the dev container are visible on the live host, so locally run only the safe ones.
+    if (($f = getenv('DORMOUSE_TEST_FILTER')) !== false && !str_contains($name, $f)) {
+        return;
+    }
     try {
         $fn();
         $passed++;
@@ -184,6 +189,29 @@ t('build-plugin.sh produces a txz with the expected layout and executable bits',
     }
 
     @unlink($txz);
+});
+
+t('build-plugin.sh is byte-reproducible across umask, TZ and xz threading defaults', function () use ($repoRoot) {
+    // The .plg's &md5; is committed before the tag and the GitHub release workflow rebuilds and requires it to match,
+    // so the build must not depend on the machine. It did: xz >= 5.6 compresses multi-threaded by default, which
+    // writes sizes into the block header, so the dev container (xz 5.8.1) built 15190928... where Gitea CI (xz 5.4.5)
+    // built f55ba445... from a byte-identical tar stream. Each variant perturbs something a runner can differ in.
+    $variants = [
+        'plain' => '',
+        'umask' => 'umask 077; TZ=Asia/Tokyo ',
+        'xz-mt' => 'umask 002; XZ_DEFAULTS=-T0 ',
+        'xz-st' => 'XZ_DEFAULTS=-T1 ',
+    ];
+    $md5s = [];
+    foreach ($variants as $tag => $prefix) {
+        $v = "repro-$tag";
+        $out = [];
+        exec('bash -c ' . escapeshellarg($prefix . 'bash ' . escapeshellarg("$repoRoot/scripts/build-plugin.sh") . " $v") . ' 2>&1', $out, $rc);
+        assert_eq(0, $rc, "build ($tag) failed:\n" . implode("\n", $out));
+        $md5s[$tag] = md5_file("$repoRoot/dist/dormouse-$v.txz");
+        @unlink("$repoRoot/dist/dormouse-$v.txz");
+    }
+    assert_eq(1, count(array_unique($md5s)), 'builds differ: ' . json_encode($md5s));
 });
 
 // --- rc.dormouse behaviour ----------------------------------------------------

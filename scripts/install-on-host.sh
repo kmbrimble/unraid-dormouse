@@ -62,11 +62,11 @@ done
 
 INSTALLED_VERSION="$("${SSH[@]}" "sed -rn 's|^<!ENTITY version[[:space:]]+\"([^\"]+)\">.*|\1|p' /boot/config/plugins/$PLG 2>/dev/null || true")"
 
-# The host has no python3 and this container has no php, so the strcmp
-# check runs here in python3 (the container has it) rather than via
-# scripts/version-sorts-after.php (which the release workflow and tests use,
-# both on GitHub-hosted runners that do have php). Same rule either way:
-# plain string comparison, matching dynamix.plugin.manager's `plugin` script.
+# The host has no python3, so the strcmp check runs here in the dev
+# container, in python3. (The container now has php too, PHP 8.4.27, so
+# scripts/version-sorts-after.php, which CI, the release workflow and the
+# tests use, would also work here.) Same rule either way: plain string
+# comparison, matching dynamix.plugin.manager's `plugin` script.
 if [[ -n "$INSTALLED_VERSION" && -z "$FORCED" ]]; then
     if ! python3 -c 'import sys; sys.exit(0 if sys.argv[2] > sys.argv[1] else 1)' "$INSTALLED_VERSION" "$VERSION"; then
         echo "ERROR: $VERSION does not sort after installed $INSTALLED_VERSION (strcmp). Use --forced to override." >&2

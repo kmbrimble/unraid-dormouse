@@ -31,10 +31,19 @@ mkdir -p "$OUT_DIR"
 TXZ="$OUT_DIR/$NAME-$VERSION.txz"
 rm -f "$TXZ"
 
-# Deterministic archive: sorted names, fixed mtime, numeric owner. The same source must give the same
-# bytes on the Gitea runner and on the GitHub runner, because the .plg's <MD5> is committed before the
-# tag and the GitHub release workflow rebuilds and requires it to match (scripts/check-md5.sh).
-tar -C "$WORK_DIR" --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner -cJf "$TXZ" usr
+# Deterministic archive: the same source must give the same bytes on any machine, because the .plg's
+# <MD5> is committed before the tag and the GitHub release workflow rebuilds and requires it to match
+# (scripts/check-md5.sh).
+# - sorted names, fixed mtime, numeric root owner;
+# - --mode: cp/mkdir/git checkout follow the caller's umask, so normalise to 0644 files / 0755 dirs
+#   (the chmod +x above survives as 0755);
+# - xz -T1 on the command line: xz >= 5.6 defaults to multi-threaded, which writes sizes into the block
+#   header and changes the bytes (identical tar stream, different .txz). Command-line flags beat
+#   XZ_OPT/XZ_DEFAULTS.
+# tests/run.php builds under different umask/TZ/XZ_DEFAULTS and requires one md5.
+echo "  $(tar --version | head -1); $(xz --version | head -1)" >&2  # stderr: check-md5.sh discards stdout
+tar -C "$WORK_DIR" --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner \
+    --mode='u=rwX,go=rX' -I 'xz -6 -T1' -cf "$TXZ" usr
 
 MD5="$(md5sum "$TXZ" | awk '{print $1}')"
 
