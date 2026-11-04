@@ -96,6 +96,17 @@ done
 
 upgradepkg --install-new &plgPATH;/&name;-&version;.txz
 
+# Only Method="remove" wipes &plgPATH;, so every upgrade would otherwise leave
+# its predecessor's package on flash. Reached only after upgradepkg succeeded
+# (set -e). Deletes nothing but regular files named &name;-DIGIT...txz other
+# than the current one; an unmatched glob stays literal and fails the -f test.
+# Best-effort (|| true): a failed delete, e.g. flash remounted read-only, must
+# never abort the install under set -e before the daemon start below.
+for OLD in "&plgPATH;/&name;-"[0-9]*.txz; do
+  [[ -f "$OLD" ]] || continue
+  [[ "$OLD" == "&plgPATH;/&name;-&version;.txz" ]] || rm -f "$OLD" || true
+done
+
 mkdir -p &plgPATH;
 
 # The Phase 1 release seeded a comment-only placeholder cfg. Detect that

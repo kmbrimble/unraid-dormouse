@@ -92,6 +92,122 @@ t('install block stops the daemon before upgradepkg, so an upgrade cannot leave 
     assert_true($stopPos < $upgradePos, 'rc.dormouse stop must run before upgradepkg, or an upgrade leaves the old daemon running under the new files');
 });
 
+/**
+ * Runs the .plg's real install INLINE under bash against a temp flash dir, the way the plugin manager does:
+ * &plgPATH;/&emhttp; (and optionally &version;) are rewritten in the DOCTYPE, libxml expands the entities, and
+ * upgradepkg/removepkg are recording stubs on PATH (rc.dormouse and array-ready.sh are -f gated on the temp
+ * &emhttp;, which does not exist, so they are skipped). $files are names to create in the flash dir (a trailing
+ * '/' makes a directory). Returns [exit code, sorted remaining flash entries, stub log + output].
+ */
+function dormouse_run_install_inline(array $files, ?string $version = null, int $upgradepkgRc = 0): array
+{
+    $tmp = sys_get_temp_dir() . '/dormouse-inline-' . uniqid();
+    mkdir("$tmp/flash", 0700, true);
+    mkdir("$tmp/bin");
+    $plg = file_get_contents(__DIR__ . '/../dormouse.plg');
+    $plg = preg_replace('|<!ENTITY plgPATH\s+"[^"]*">|', "<!ENTITY plgPATH \"$tmp/flash\">", $plg, 1, $n1);
+    $plg = preg_replace('|<!ENTITY emhttp\s+"[^"]*">|', "<!ENTITY emhttp \"$tmp/emhttp\">", $plg, 1, $n2);
+    assert_eq([1, 1], [$n1, $n2], 'plgPATH and emhttp entities must exist to be redirected');
+    if ($version !== null) {
+        $plg = preg_replace('|<!ENTITY version\s+"[^"]*">|', "<!ENTITY version \"$version\">", $plg, 1);
+    }
+    $inline = null;
+    foreach (simplexml_load_string($plg, \SimpleXMLElement::class, LIBXML_NOENT)->FILE as $file) {
+        if ((string) $file['Run'] === '/bin/bash' && !isset($file['Method'])) {
+            $inline = (string) $file->INLINE;
+        }
+    }
+    assert_true($inline !== null, 'install INLINE not found');
+    file_put_contents("$tmp/install.sh", $inline);
+
+    foreach ($files as $f => $body) {
+        if (is_int($f)) {
+            [$f, $body] = [$body, 'x'];
+        }
+        str_ends_with($f, '/') ? mkdir("$tmp/flash/$f") : file_put_contents("$tmp/flash/$f", $body);
+    }
+    foreach (['upgradepkg' => '${UPGRADEPKG_RC:-0}', 'removepkg' => '0'] as $stub => $rc) {
+        file_put_contents("$tmp/bin/$stub", "#!/bin/bash\necho \"$stub \$*\" >> \"\$STUB_LOG\"\nexit $rc\n");
+        chmod("$tmp/bin/$stub", 0755);
+    }
+    $env = 'PATH=' . escapeshellarg("$tmp/bin:" . getenv('PATH')) . ' STUB_LOG=' . escapeshellarg("$tmp/log")
+        . " UPGRADEPKG_RC=$upgradepkgRc";
+    $out = [];
+    exec("env $env bash " . escapeshellarg("$tmp/install.sh") . ' 2>&1', $out, $code);
+    $left = [];
+    foreach (array_diff(scandir("$tmp/flash"), ['.', '..']) as $e) {
+        $left[] = is_dir("$tmp/flash/$e") ? "$e/" : $e;
+    }
+    sort($left);
+    $log = is_file("$tmp/log") ? file_get_contents("$tmp/log") : '';
+    exec('rm -rf ' . escapeshellarg($tmp));
+    return [$code, $left, $log . implode("\n", $out)];
+}
+
+// Files the install block must never delete: the live host's flash dir names (ls, read-only, 2026-11-04). The cfg
+// has a real key so the install block's placeholder-cfg rewrite leaves it alone.
+const DORMOUSE_PRUNE_SURVIVORS = [
+    'dormouse.cfg' => "pool_root=/mnt/snowflake\n",
+    'dormouse.cfg.bak-20260915-180716' => 'x',
+];
+
+function dormouse_plg_version(): string
+{
+    preg_match('|<!ENTITY version\s+"([^"]+)">|', file_get_contents(__DIR__ . '/../dormouse.plg'), $m);
+    return $m[1];
+}
+
+function dormouse_expected_flash(array ...$names): array
+{
+    $all = array_merge(array_keys(DORMOUSE_PRUNE_SURVIVORS), ...$names);
+    sort($all);
+    return $all;
+}
+
+t('plg install: old versioned .txz packages are deleted after upgradepkg, current one kept', function () {
+    $cur = 'dormouse-' . dormouse_plg_version() . '.txz';
+    $old = ['dormouse-0.1.0.txz', 'dormouse-0.2.0.txz', 'dormouse-0.2.1.txz', 'dormouse-0.2.2.txz'];
+    [$code, $left, $log] = dormouse_run_install_inline(DORMOUSE_PRUNE_SURVIVORS + array_merge($old, [$cur]));
+    assert_eq(0, $code, $log);
+    assert_true(str_contains($log, 'upgradepkg --install-new'), 'upgradepkg must have run: ' . $log);
+    assert_eq(dormouse_expected_flash([$cur]), $left);
+});
+
+t('plg install: only the current .txz present leaves the flash dir unchanged', function () {
+    $cur = 'dormouse-' . dormouse_plg_version() . '.txz';
+    [$code, $left, $log] = dormouse_run_install_inline(DORMOUSE_PRUNE_SURVIVORS + [$cur]);
+    assert_eq(0, $code, $log);
+    assert_eq(dormouse_expected_flash([$cur]), $left);
+});
+
+t('plg install: no .txz at all (glob matches nothing) succeeds and deletes nothing', function () {
+    [$code, $left, $log] = dormouse_run_install_inline(DORMOUSE_PRUNE_SURVIVORS);
+    assert_eq(0, $code, $log);
+    assert_eq(dormouse_expected_flash(), $left);
+});
+
+t('plg install: odd version shapes - prefix-like current version, rc, spaces, non-file and non-digit names', function () {
+    // Current version is an rc whose prefix is itself a valid older version: only the exact quoted name survives.
+    $cur = 'dormouse-0.2.4-rc.1.txz';
+    $deleted = ['dormouse-0.2.4.txz', 'dormouse-0.2.4-rc.1.txz.txz', 'dormouse-0.2.3 copy.txz', 'dormouse-1.txz'];
+    $kept = ['dormouse-9.9.9.txz/', 'dormouse-backup.txz', 'dormouse-0.2.2.txz.bak', 'other-plugin-1.0.0.txz',
+        'dormouse-0.2.2.TXZ'];
+    [$code, $left, $log] = dormouse_run_install_inline(
+        DORMOUSE_PRUNE_SURVIVORS + array_merge($deleted, $kept, [$cur]),
+        '0.2.4-rc.1'
+    );
+    assert_eq(0, $code, $log);
+    assert_eq(dormouse_expected_flash($kept, [$cur]), $left);
+});
+
+t('plg install: a failed upgradepkg aborts before any .txz is deleted', function () {
+    $cur = 'dormouse-' . dormouse_plg_version() . '.txz';
+    $txz = ['dormouse-0.2.2.txz', $cur];
+    [$code, $left, $log] = dormouse_run_install_inline(DORMOUSE_PRUNE_SURVIVORS + $txz, null, 1);
+    assert_true($code !== 0, 'install must fail when upgradepkg fails: ' . $log);
+    assert_eq(dormouse_expected_flash($txz), $left);
+});
+
 t('version guard accepts 0.1.0 -> 0.1.1', function () {
     assert_true(version_sorts_after('0.1.0', '0.1.1'));
 });
