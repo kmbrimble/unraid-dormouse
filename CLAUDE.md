@@ -10,7 +10,7 @@ plan.
 
 **Gitea is primary; GitHub is a read-only push mirror.** Develop against `https://git.kiztigs.com/kmbrimble/unraid-dormouse`
 (`origin`, via the gt credential helper; use `gt`, not `gh`, for issues/PRs). `github.com/kmbrimble/unraid-dormouse` receives every
-push to Gitea within about a minute (`sync_on_commit`, plus an 8-hourly sweep) and **must never be pushed to directly**: the mirror
+push to Gitea within about a minute (`sync_on_commit`, plus a 10-minute sweep: `interval: 10m0s` in Gitea's `push_mirrors` API, checked 2026-11-04) and **must never be pushed to directly**: the mirror
 force-syncs and prunes refs, so anything that exists only on GitHub is lost. GitHub has Issues, Wiki, Projects, Discussions and PRs
 switched off. The `.plg` URLs (`raw.githubusercontent.com/.../main/dormouse.plg` and the GitHub release assets) deliberately still
 point at GitHub, which is where installed servers fetch from.
@@ -20,38 +20,35 @@ point at GitHub, which is where installed servers fetch from.
 - CI lives in `.gitea/workflows/ci.yml` (the Gitea runner reads that directory only). It includes a **release-readiness** step:
   if `&version;` in `dormouse.plg` has no `v<version>` tag yet, the build must be reproducible and `&md5;` must already equal its md5.
 - **How to release:** in the PR that bumps `&version;` (and adds the `###<version>` CHANGES entry and the CHANGELOG), also set `&md5;`.
-  Get the value from CI: the release-readiness step fails with `set &md5; to <value>` on the first run, so push again with that
+  Get the value from CI: the release-readiness step fails with `Set &md5; to <value> in the PR that bumps the version.` (`scripts/check-md5.sh`) on the first run, so push again with that
   value. Merge the PR, then tag the merge commit on Gitea (`git tag v<version> && git push origin v<version>`). The tag is mirrored;
   `.github/workflows/release.yml` on GitHub then rebuilds, requires the same md5, and publishes the GitHub Release with the `.txz`.
   Nothing writes back to the repo after the tag. See the `forge-release` skill.
 - `release.yml` is also dispatchable by hand on GitHub as a **dry run** (builds and prints the md5, publishes nothing).
-- The first real release on this layout is the final proof of the tag path; it had not happened when this section was written.
+- The first real release on this layout is the final proof of the tag path; it had not happened when this section was written, and still had not on 2026-11-04 (latest tag `v0.2.3`, which predates the Gitea move).
 
 ## Non-negotiable constraints
 
-Hard-won from SecretsMan and NetMan. Not optional, not footnotes.
+Hard-won from SecretsMan and NetMan. Not optional, not footnotes. Rules 1–7 apply to any
+Unraid plugin; the rationale and the general procedure are in the `unraid-plugin-packaging`
+skill (headings named per rule). Each rule's statement and every Dormouse-specific detail stay
+here.
 
-1. **Versions are compared with `strcmp`, not semver.** `dynamix.plugin.manager`'s
-   `plugin` script does a plain string compare, so `1.0.10` sorts *older* than
-   `1.0.9`. Keep every version component single-digit or zero-padded. Never cross
-   from date-based to semantic versioning without `plugin install <url> forced`.
-   The release workflow refuses to publish a version that does not sort after the
-   previous tag as a plain string — enforced by `scripts/version-sorts-after.php`,
-   shared between `.github/workflows/release.yml` and `tests/run.php`.
-2. **A `FILE` block with no `<MD5>`/`<SHA256>` is never overwritten.** A plain
-   `<INLINE>` file is written once and skipped forever. Do not add a versionless
-   md5 sidecar and re-check the download against it in a script — that fails
-   every upgrade after the first with a spurious mismatch. No bash-level md5
-   check exists anywhere in this repo; the plugin manager verifies the `.txz`
-   against the `<MD5>` on its own `FILE` block, and that is the only check.
-3. **The Plugins tab description comes from the installed `README.md`.**
-   `plugin/README.md` stays in the stock shape: `**Dormouse**`, a blank line, one
-   paragraph, no headings. Packaging the repo README puts an H1 into a shared
-   table cell and blows out the row height.
-4. **Exercise the uninstall path deliberately.** Every script a `.plg` `FILE`
-   block invokes must have a shebang and be gated on `[[ -f script ]]`, never
-   `[[ -x script ]]` — SecretsMan's uninstall once silently never ran because its
-   script had no shebang and was gated on `-x`.
+1. **Versions are compared with `strcmp`, not semver** (`1.0.10` sorts older than `1.0.9`):
+   keep every component single-digit or zero-padded; never cross from date-based to semantic
+   versions without `plugin install <url> forced`. Enforced by `scripts/version-sorts-after.php`,
+   shared between `.github/workflows/release.yml` (refuses a version that does not sort after
+   the previous tag) and `tests/run.php`. Skill: "Versions are compared with strcmp".
+2. **A `FILE` block with no `<MD5>`/`<SHA256>` is never overwritten.** No versionless md5
+   sidecar, no re-check of the download in a script. No bash-level md5 check exists anywhere
+   in this repo; the plugin manager's check of the `.txz` against its own `FILE` block's
+   `<MD5>` is the only one. Skill: "FILE blocks and checksums".
+3. **The Plugins tab description comes from the installed `README.md`.** `plugin/README.md`
+   stays in the stock shape: `**Dormouse**`, a blank line, one paragraph, no headings. Never
+   package the repo README. Skill: "Package layout".
+4. **Exercise the uninstall path deliberately.** Every script a `.plg` `FILE` block invokes
+   has a shebang and is gated on `[[ -f script ]]`, never `[[ -x script ]]` (SecretsMan's
+   uninstall once silently never ran that way). Skill: "Install and remove scripts".
    **Documented exception:** `plugin/event/started` and
    `plugin/event/stopping_svcs` (0.2.3) — emhttpd's own `emhttp_event`
    dispatcher (`/usr/local/sbin/emhttp_event` on the host, read live
@@ -67,23 +64,15 @@ Hard-won from SecretsMan and NetMan. Not optional, not footnotes.
    (tmpfs, rebuilt at boot), not a bug.
 6. **`gh release list` is not evidence about what is on the host.** Read
    `/boot/config/plugins/dormouse.plg` on the host itself.
-7. **Plugins install before the array's pools mount at boot — never start
-   the daemon unconditionally from the `.plg` install step.** Verified live
-   2026-09-15: `/boot/logs/syslog` for the 12 Sep boot shows
-   `rc.local: plugin: installing: …` from 11:20:38-11:22:00, and
-   `emhttpd: mounting /mnt/cache` only at 11:22:14 — plugins install first,
-   pools mount after. `findmnt /mnt` → `rootfs[/mnt] rootfs`: `/mnt` itself
-   is a bind mount of rootfs (same `st_dev` as `/`, confirmed via
-   `stat -c '%n dev=%d' / /mnt /mnt/cache /mnt/snowflake` on the host,
-   2026-09-15 — `/`=2, `/mnt`=2, `/mnt/cache`=44, `/mnt/snowflake`=45), so
-   `mountpoint -q /mnt` is true even before any pool is mounted. A guard
-   that walks up an unmounted target's path looking for the nearest
-   directory `mountpoint -q` accepts will stop at `/mnt` and wrongly report
-   "mounted" — compare device IDs against root instead (see
-   `dormouse_db_path_mounted()` in `lib.php`), never `mountpoint -q` on an
-   intermediate ancestor. The install step, the daemon itself, and the
-   emhttpd `started`/`stopping_svcs` event hooks together are what make
-   0.2.3 safe — see "Boot order and lifecycle" below.
+7. **Plugins install before the array's pools mount at boot — never start the daemon
+   unconditionally from the `.plg` install step.** On this host `/mnt` is a bind mount of
+   rootfs (same `st_dev` as `/`), so `mountpoint -q /mnt` is true before any pool mounts: never
+   walk up an unmounted target's path to the nearest ancestor `mountpoint -q` accepts. Compare
+   device IDs against root instead (`dormouse_db_path_mounted()` in `lib.php`). The install
+   step, the daemon itself, and the emhttpd `started`/`stopping_svcs` event hooks together are
+   what make 0.2.3 safe — see "Boot order and lifecycle" below. Skill: "Boot, array start and
+   daemons". The live evidence (syslog timestamps of the 12 Sep boot, `findmnt`, the `stat`
+   device IDs, verified 2026-09-15) is in `docs/history.md`.
 
 ### Boot order and lifecycle (0.2.3)
 
@@ -127,24 +116,29 @@ Hard-won from SecretsMan and NetMan. Not optional, not footnotes.
   SQLite handle (`manifest.db`/-wal/-shm) on `/mnt/cache`, which is exactly
   what the `stopping_svcs` hook exists to release before the array unmounts
   disks.
-- **Not yet verified:** behaviour across a real reboot (this project's dev
-  container cannot reboot the host — see "Dev-environment fact" below).
+- **Not yet verified:** behaviour across a real reboot (reboots are the user's action, never this
+  dev container's — see the `unraid-live-host-testing` skill, "Hard limits").
   Everything above was verified by hand-running the event scripts and by
   reading live host state; a real boot-time install has not been observed
   end-to-end.
 
 ### WebGUI rules
 
-- **Do not use multipart `FormData`/`fetch()`** — incompatible with the host's
-  nginx `auth_request` subrequest setup. Plain urlencoded `$.post` is the only
-  proven-working POST path in the Unraid webGui.
-- **Do not add a custom CSRF check.** `local_prepend.php` consumes and unsets
-  `$_POST['csrf_token']` before plugin code runs; a redundant check always 403s.
-- **Functions reachable from both CLI and web must not reference `STDOUT`,
-  `STDERR` or `$argv`.** `tests/run.php` runs under the CLI SAPI where these
-  exist, which makes this bug class structurally invisible to the test suite.
+The rules and their rationale are in the `unraid-webgui-plugin-pages` skill ("Requests:
+transport and CSRF", "PHP endpoints"). In this repo:
+
+- Plain urlencoded `$.post` is the only POST path `Dormouse.page` uses — no multipart
+  `FormData`, no `fetch()`.
+- No custom CSRF check in `dormouse-api.php` (`local_prepend.php` has already consumed and
+  unset `$_POST['csrf_token']`).
+- Functions reachable from both CLI and web must not reference `STDOUT`, `STDERR` or `$argv`.
+  `tests/run.php` runs under the CLI SAPI where these exist, which makes this bug class
+  structurally invisible to the test suite.
 
 ### Release requirements (every build)
+
+Mechanics (version-bump PR, `&md5;` from CI, tagging, verifying the GitHub Release) are in the
+`forge-release` skill and "Forge and releases" above. Every release also needs:
 
 - `.plg` published as a GitHub Release with the `.txz` attached and the real
   `<MD5>` written onto the FILE block (committed in the version-bump PR, see "Forge and releases").
@@ -216,27 +210,29 @@ build plan for the exact commands used):
 
 ## Dev-environment fact: this container runs ON the live host
 
-Verified 2026-09-13: this dev container (`claude-code`) is itself a Docker
-container on the production Unraid box that `scripts/*-on-host.sh` ssh into,
-with the host's docker socket bind-mounted in. So `docker images`/`docker ps`
-here show the live production containers, and a process started in this
-container is visible in `ps` over `ssh root@192.168.0.10` under its real pid —
-because the host sees every container's processes, not because namespaces are
-shared (the container still has its own PID namespace). Two consequences:
+Verified 2026-09-13: this dev container (`claude-code`) is itself a Docker container on the
+production Unraid box that `scripts/*-on-host.sh` ssh into, with the host's docker socket
+bind-mounted in. The consequences (no staging box, `docker run` starts a real container on the
+NAS, `pgrep -f`/`pkill -f` can self-match the agent's prompt so bracket one character, e.g.
+`[d]ormoused`) are in the `unraid-live-host-testing` skill ("Hard limits", "Things this
+environment does that surprise"); throwaway-container and cleanup rules are in the global
+`CLAUDE.md`. Two Dormouse-specific points:
 
-- `docker run` here starts a real container on the production NAS. Don't reach
-  for a throwaway image (e.g. a PHP image) to get missing local tooling — this
-  container has no PHP and no `xz`; leave PHP tests and the `.txz` build to CI,
-  which runs on the isolated Gitea runner VM (and the tag release on a GitHub-hosted runner). (A global PreToolUse hook
-  only auto-allows `docker rm`/`docker stop` on `smoketest-` prefixed names.)
-- Any `pgrep -f` (or similar) run against this host will match THIS agent
-  session's own process if the pattern is a substring of the task prompt —
-  the prompt is visible in `ps` output verbatim. `scripts/uninstall-on-host.sh`
-  hit this twice while being debugged: first matching a bare `dormoused`
-  substring, then matching its own `pgrep -f '...'` invocation's quoted
-  argument after being narrowed to a full path. Match a specific-enough
-  pattern and bracket one character of it (`[d]ormoused`) so pgrep's own
-  invoking shell can't self-match.
+- A process started in this container is visible in `ps` over `ssh root@192.168.0.10` under
+  its real pid — because the host sees every container's processes, not because namespaces are
+  shared (the container still has its own PID namespace).
+- This container now has `php` (8.4.27 CLI) and `xz` (5.8.1) (`command -v php xz`, both
+  `/usr/bin`, checked 2026-11-04; the 2026-09-13 text said it had neither). The full
+  `php tests/run.php` still runs in CI only (the isolated Gitea runner VM; the tag release on a
+  GitHub-hosted runner): its `rc.dormouse` tests start and SIGKILL real processes, which are
+  visible on the live host. A filtered local run is safe — see "Test command".
+  From PR #4 (`build-plugin.sh` pins `xz -6 -T1` and `--mode`) a local build gives the same md5
+  as CI (`f55ba445…` for `main`'s v0.2.3 tree both locally and in Gitea CI run 149, 2026-11-04);
+  before it, the container's multi-threaded xz 5.8.1 gave a different one. Still take the
+  release `&md5;` from the CI log of the exact commit (see `forge-release`).
+
+`scripts/uninstall-on-host.sh` hit the `pgrep` self-match twice while being debugged; that
+history, and the original text of this section, are in `docs/history.md`.
 
 ## Repo layout
 
@@ -461,6 +457,13 @@ implement yet.
 php tests/run.php
 ```
 
+That is the full suite, and it runs in CI only: it starts and kills real processes, which this
+dev container shares with the live host. Locally, once PRs #4 and #5 have merged, run only
+matching tests with `DORMOUSE_TEST_FILTER=<pattern> php tests/run.php` (a substring of the test
+name). That is safe for the build and install-block tests: `reproducible`, `build-plugin.sh` and
+`plg install:` (the last runs the real install INLINE against recording stubs and starts nothing).
+Anything else, the `rc.dormouse` and `dormoused` tests above all, stays in CI.
+
 ## Deploy and verify
 
 1. `scripts/install-on-host.sh [version] [--forced]` — installs or upgrades on
@@ -471,25 +474,20 @@ php tests/run.php
    flash `.plg`, no flash plugin dir, no installed tree, no plugin-manager
    registration, no daemon process, no pid file, no package entry.
 3. After tagging, watch the GitHub release workflow with `gh run list -R kmbrimble/unraid-dormouse` / `gh run watch <id>
-   --exit-status` (a read on GitHub, allowed). CI for PRs is on Gitea: `gt run list -R kmbrimble/unraid-dormouse`.
+   -R kmbrimble/unraid-dormouse --exit-status` (a read on GitHub, allowed). CI for PRs is on Gitea: `gt run list -R kmbrimble/unraid-dormouse`.
 
 ## Phase roadmap
 
 Each phase is one `/feature` invocation, ends green in CI with a cut release,
 and is verified on the live host before the next phase starts.
 
-- **Phase 1 — scaffold and release pipeline. (0.1.0, shipped.)** Repo,
-  `.plg` skeleton, packaging script, release workflow with the strcmp version
-  guard, empty settings page, `rc.dormouse` starting/stopping a no-op daemon.
-  Installed and uninstalled on the live host, uninstall verified to revert
-  cleanly, before any tiering logic exists.
-- **Phase 2 — observation mode (no moves). (this release, 0.2.0, current.)**
-  Both event sources unified into an `activity` table; settings page shows a
-  live activity view; moves impossible, not merely disabled (enforced by a
-  grep test over `plugin/`). Installed on the live host over 0.1.0, verified
-  the cfg upgrade and the new daemon; the evidence week starts at install and
-  runs for a week from there to decide which shares beyond Content benefit.
-  See "Live-host verification gates — Phase 2" below for results.
+- **Phase 1 — scaffold and release pipeline. (0.1.0, shipped.)**
+- **Phase 2 — observation mode (no moves). (0.2.0–0.2.3 shipped; current phase.)** Both
+  event sources unified into an `activity` table, plus disk spin state (Source C, 0.2.1), ZFS
+  kstat attribution (Source D, 0.2.2) and boot-order safety (0.2.3); moves impossible, not
+  merely disabled (enforced by a grep test over `plugin/`). The evidence week started at the
+  0.2.0 install (2026-09-13) to decide which shares beyond Content benefit; its conclusion is
+  not recorded in this repo. Full Phase 1/2 write-ups: `docs/history.md`.
 - **Phase 3 — manifest, rules engine, dry-run promote.** SQLite schema, startup
   reconciliation, both rule classes, fill guard, full decision logging. Still
   moves nothing.
@@ -500,57 +498,25 @@ and is verified on the live host before the next phase starts.
 - **Phase 7 — interlocks and coexistence.** PlexCache-D exclusion export,
   mover/parity pause, a second rule class enabled based on Phase 2 evidence.
 
-## Live-host verification gates — Phase 2
+## Phase 2 verification gates — outcomes still in force
 
-All run 2026-09-13, on the host, immediately after `install-on-host.sh 0.2.0`
-upgraded 0.1.0 in place. Each probe cleaned up after itself (confirmed below).
+Gates G1–G5 ran on the host 2026-09-13 after `install-on-host.sh 0.2.0`; the full write-up
+(probe commands, cleanup, measurements) is in `docs/history.md`. What later phases depend on:
 
-- **G1 — shfs union probe: PASS.** `touch /mnt/cache/Content/.dormouse-probe`,
-  confirmed visible at `/mnt/user/Content/.dormouse-probe`, removed it,
-  confirmed gone from `/mnt/user` too. The `only`-on-snowflake share's cache
-  copy is transparently unioned in, as PLAN.md assumed.
-- **G2 — hold-directory visibility: does NOT auto-promote.**
-  `mkdir /mnt/snowflake/.dormouse`, waited 10s: absent from both
-  `ls /mnt/user/` and `ls /boot/config/shares/`. `rmdir`'d it. Unraid does
-  **not** turn a dot-prefixed top-level pool directory into a share on this
-  host — the preferred hold location
-  (`/mnt/snowflake/.dormouse/hold/<share>/<relpath>`) from PLAN.md §4 is
-  usable as-is; the in-share fallback is not needed. Decision for Phase 4.
-- **G3 — `inotifywait -m -r` new-directory behaviour: auto-adds.** Under
-  `/mnt/snowflake/Content/.dormouse-probe-g3/`, started `inotifywait -m -r`,
-  created a subdirectory, created and read a file inside it. Output included
-  `Watching new directory .../newsub/` and delivered CREATE/OPEN/ACCESS/
-  CLOSE_NOWRITE for the new file. `-r` does pick up directories created after
-  start on this host/inotify-tools version — not used by Phase 2's
-  fixed-depth-plus-periodic-refresh design, but recorded as a live option for
-  Phase 3+. Probe dir removed after.
-- **G4 — `IN_Q_OVERFLOW` under a real large read: no overflow, daemon
-  survived.** Found a real Content episode ≥10GB
-  (`find ... -size +10G -print -quit`), `cat` to `/dev/null` (19s). After the
-  60s coalescing window: `inotify_overflow_count` stat key absent (never
-  incremented), one coalesced `access` row with `count=28004`, plus one
-  `open` and one `close` row — not ~28,000 individual rows. Daemon's pid was
-  unchanged before/after (no crash/restart). `IN_Q_OVERFLOW` handling
-  remains code-reviewed but not exercised — the drain loop comfortably
-  outran this read.
-- **G5 — Plex directory-watch handles: file-open half confirmed, dirwatch
-  half not observed live.** No Plex session was connected during this
-  window, so no root-directory handle existed to capture. Generated a real
-  SMB file open instead (`smbclient //127.0.0.1/Content -N -c 'get ...'`,
-  chosen to run ~18s so multiple 15s daemon polls would catch it): live
-  `smbstatus -j` showed the open handle across 6 consecutive polls, and the
-  `activity` table recorded `source=smb, event=open` then `close`, with
-  `client_ip=127.0.0.1` (resolved via `tcon.machine`, confirming the IP path
-  works end to end on real Samba output, not just the fixture). The
-  dirwatch-vs-open discrimination itself (root handle → `.` or `""` →
-  `dirwatch`) is unit-tested against the earlier live capture's shape but
-  **was not confirmed against a live Plex root handle** — recheck once Plex
-  is actively browsing during the evidence week; if Samba reports something
-  other than `.`/`""` for this host's actual Plex session, `dormouse_parse_smbstatus_json()`
-  in `plugin/scripts/lib.php` needs a third case added.
-- **End-to-end: PASS, both paths.** A `cat` of a small Content file via
-  `/mnt/user/Content/...` (not `/mnt/snowflake/...` directly) produced
-  `open`/`close`/coalesced-`access` rows on the ZFS-side watch within the
-  minute — confirms shfs reads route down to the pool path the daemon
-  actually watches. (The ≥10GB G4 read was done directly via
-  `/mnt/snowflake/...` and also confirmed.)
+- **G1:** shfs unions the `only`-on-snowflake share's cache copy into `/mnt/user/<share>`, as
+  PLAN.md assumed.
+- **G2 (decision for Phase 4):** a dot-prefixed top-level pool directory is not turned into a
+  share, so the preferred hold location `/mnt/snowflake/.dormouse/hold/<share>/<relpath>` is
+  usable as-is; the in-share fallback is not needed.
+- **G3:** `inotifywait -m -r` auto-adds directories created after start on this host — not
+  used by Phase 2's fixed-depth-plus-refresh design, a live option for Phase 3+.
+- **G4:** a ≥10 GB read produced no overflow and one coalesced `access` row; **`IN_Q_OVERFLOW`
+  handling remains code-reviewed but not exercised.**
+- **Still open — G5 dirwatch half:** the root-directory dirwatch discrimination (`.` or `""`
+  → `dirwatch`) has **not been confirmed against a live Plex root handle**. Recheck once Plex
+  is actively browsing; if Samba reports something other than `.`/`""` for this host's actual
+  Plex session, `dormouse_parse_smbstatus_json()` in `plugin/scripts/lib.php` needs a third
+  case added.
+- **End-to-end:** reads via `/mnt/user/Content/...` route down to the pool path the daemon
+  watches (shfs → ZFS-side watch confirmed).
+- Also still open: a real boot-time install (see "Boot order and lifecycle").
