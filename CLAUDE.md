@@ -29,8 +29,7 @@ homelab being up and on the host's `git.kiztigs.com` hosts entry (`/boot/config/
   then it creates the **Gitea release**, uploads the `.txz` and reads it back. Token: the job token (or Actions secret `RELEASE_TOKEN` if set).
   Nothing writes back to the repo after the tag. See the `forge-release` skill.
 - `release.yml` is also dispatchable by hand as a **dry run** (the default), or with `tag` + `publish` to recover an existing tag whose run failed
-  (tags never move). The mirrored `.github/workflows/release.yml` still exists and publishes the same deterministic bytes to a GitHub release
-  that nothing depends on.
+  (tags never move). The GitHub copy has no release workflow any more (removed in the 15 Nov 2026 GitHub exit); Gitea is the only publisher.
 - The first real release on this layout is the final proof of the tag path; it had not happened when this section was written, and still had not on 2026-11-04 (latest tag `v0.2.3`, which predates the Gitea move).
 
 ## Non-negotiable constraints
@@ -43,7 +42,7 @@ here.
 1. **Versions are compared with `strcmp`, not semver** (`1.0.10` sorts older than `1.0.9`):
    keep every component single-digit or zero-padded; never cross from date-based to semantic
    versions without `plugin install <url> forced`. Enforced by `scripts/version-sorts-after.php`,
-   shared between `.github/workflows/release.yml` (refuses a version that does not sort after
+   shared between `.gitea/workflows/release.yml` (refuses a version that does not sort after
    the previous tag) and `tests/run.php`. Skill: "Versions are compared with strcmp".
 2. **A `FILE` block with no `<MD5>`/`<SHA256>` is never overwritten.** No versionless md5
    sidecar, no re-check of the download in a script. No bash-level md5 check exists anywhere
@@ -265,7 +264,6 @@ tests/fixtures/smbstatus.json   synthetic smbstatus -j JSON (RFC 5737 IPs, fake 
 scripts/check-md5.sh            build + require the .plg &md5; to match (CI and release)
 .gitea/workflows/ci.yml         lint + test + release-readiness on push/PR (Gitea runner)
 .gitea/workflows/release.yml    on a v* tag: checks, gates, rebuild, md5, Gitea release (dry run via dispatch); scripts/gitea-release.sh
-.github/workflows/release.yml   legacy mirror workflow, still publishes a GitHub release nothing depends on
 ```
 
 ## The `activity` table (Phase 2)
