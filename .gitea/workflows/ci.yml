@@ -1,6 +1,6 @@
 name: CI
 
-# Gitea is the primary forge (GitHub is a read-only push mirror). This is the required status check on main.
+# Gitea is the primary forge and the delivery source (GitHub is a read-only push mirror). This is the required status check on main.
 
 on:
   push:
@@ -40,7 +40,7 @@ jobs:
           set -euo pipefail
           VERSION=$(sed -rn 's|^<!ENTITY version[[:space:]]+"([^"]+)">.*|\1|p' dormouse.plg)
           if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
-            echo "v$VERSION is already tagged: nothing to enforce; reporting this build's md5 for comparison with the GitHub dry run."
+            echo "v$VERSION is already tagged: nothing to enforce; reporting this build's md5 for comparison with the released asset."
             bash scripts/check-md5.sh "$VERSION" --report-only
           else
             bash scripts/check-md5.sh "$VERSION"

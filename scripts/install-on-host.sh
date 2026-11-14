@@ -1,7 +1,7 @@
 #!/bin/bash
 # Install (or upgrade) dormouse on the live Unraid host over ssh, then
 # verify the install. Run from this container — the host has no way to
-# reach GitHub Actions and this container is not on the same trust boundary
+# reach Gitea Actions and this container is not on the same trust boundary
 # as the host, so all verification happens here, over ssh, read-only aside
 # from the `plugin install` call itself.
 set -euo pipefail
@@ -22,7 +22,7 @@ for arg in "$@"; do
 done
 
 VERSION="${VERSION:-$(sed -rn 's|^<!ENTITY version[[:space:]]+"([^"]+)">.*|\1|p' "$REPO_ROOT/$PLG")}"
-PLG_URL="https://raw.githubusercontent.com/kmbrimble/unraid-dormouse/main/$PLG"
+PLG_URL="https://git.kiztigs.com/kmbrimble/unraid-dormouse/raw/branch/main/$PLG"
 
 # The release workflow commits the real md5 onto main AFTER building — wait for
 # that commit to exist upstream, and pin to ITS md5, not merely "any non-
@@ -43,7 +43,7 @@ if [[ -z "$EXPECTED_MD5" || "$EXPECTED_MD5" == "00000000000000000000000000000000
     exit 1
 fi
 
-echo "waiting for raw.githubusercontent.com to serve version $VERSION with md5 $EXPECTED_MD5..."
+echo "waiting for git.kiztigs.com to serve version $VERSION with md5 $EXPECTED_MD5..."
 ATTEMPTS=40
 for i in $(seq 1 "$ATTEMPTS"); do
     RAW="$(curl -fsSL -H 'Cache-Control: no-cache' "$PLG_URL" || true)"

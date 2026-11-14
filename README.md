@@ -37,7 +37,7 @@ file mid-playback for a session it can't otherwise see.
 Add this URL in the Unraid Plugins tab ("Install Plugin"):
 
 ```
-https://raw.githubusercontent.com/kmbrimble/unraid-dormouse/main/dormouse.plg
+https://git.kiztigs.com/kmbrimble/unraid-dormouse/raw/branch/main/dormouse.plg
 ```
 
 ## Licence

@@ -12,8 +12,10 @@ plan.
 (`origin`, via the gt credential helper; use `gt`, not `gh`, for issues/PRs). `github.com/kmbrimble/unraid-dormouse` receives every
 push to Gitea within about a minute (`sync_on_commit`, plus a 10-minute sweep: `interval: 10m0s` in Gitea's `push_mirrors` API, checked 2026-11-04) and **must never be pushed to directly**: the mirror
 force-syncs and prunes refs, so anything that exists only on GitHub is lost. GitHub has Issues, Wiki, Projects, Discussions and PRs
-switched off. The `.plg` URLs (`raw.githubusercontent.com/.../main/dormouse.plg` and the GitHub release assets) deliberately still
-point at GitHub, which is where installed servers fetch from.
+switched off. **Delivery is from Gitea (since 0.2.4, 14 Nov 2026; Kieren's decision: Gitea delivers all his Unraid plugins, GitHub is for HACS
+add-ons only):** `pluginURL` is `https://git.kiztigs.com/kmbrimble/unraid-dormouse/raw/branch/main/dormouse.plg` and the `.txz` comes from the Gitea
+release. The owner is public on Gitea (LAN-only behind Caddy's `@git_lan_only`), so no token is needed. Cost: plugin updates depend on the
+homelab being up and on the host's `git.kiztigs.com` hosts entry (`/boot/config/go`).
 
 - `main` is protected on Gitea: changes go through a PR, the Gitea CI check (`CI / lint-and-test`) must be green, and butler-bot
   merges its own green PRs (no human approval).
@@ -21,10 +23,14 @@ point at GitHub, which is where installed servers fetch from.
   if `&version;` in `dormouse.plg` has no `v<version>` tag yet, the build must be reproducible and `&md5;` must already equal its md5.
 - **How to release:** in the PR that bumps `&version;` (and adds the `###<version>` CHANGES entry and the CHANGELOG), also set `&md5;`.
   Get the value from CI: the release-readiness step fails with `Set &md5; to <value> in the PR that bumps the version.` (`scripts/check-md5.sh`) on the first run, so push again with that
-  value. Merge the PR, then tag the merge commit on Gitea (`git tag v<version> && git push origin v<version>`). The tag is mirrored;
-  `.github/workflows/release.yml` on GitHub then rebuilds, requires the same md5, and publishes the GitHub Release with the `.txz`.
+  value. Merge the PR, then tag the merge commit on Gitea (`git tag v<version> && git push origin v<version>`). The tag runs
+  `.gitea/workflows/release.yml`: repo checks, then `scripts/gitea-release.sh` (shared by all plugin repos; canonical copy in
+  unraid-flightplan): tag == `&version;`, CHANGES entry, strcmp order against every other tag, deterministic rebuild with `&md5;` equal,
+  then it creates the **Gitea release**, uploads the `.txz` and reads it back. Token: the job token (or Actions secret `RELEASE_TOKEN` if set).
   Nothing writes back to the repo after the tag. See the `forge-release` skill.
-- `release.yml` is also dispatchable by hand on GitHub as a **dry run** (builds and prints the md5, publishes nothing).
+- `release.yml` is also dispatchable by hand as a **dry run** (the default), or with `tag` + `publish` to recover an existing tag whose run failed
+  (tags never move). The mirrored `.github/workflows/release.yml` still exists and publishes the same deterministic bytes to a GitHub release
+  that nothing depends on.
 - The first real release on this layout is the final proof of the tag path; it had not happened when this section was written, and still had not on 2026-11-04 (latest tag `v0.2.3`, which predates the Gitea move).
 
 ## Non-negotiable constraints
@@ -137,10 +143,10 @@ transport and CSRF", "PHP endpoints"). In this repo:
 
 ### Release requirements (every build)
 
-Mechanics (version-bump PR, `&md5;` from CI, tagging, verifying the GitHub Release) are in the
+Mechanics (version-bump PR, `&md5;` from CI, tagging, verifying the Gitea release) are in the
 `forge-release` skill and "Forge and releases" above. Every release also needs:
 
-- `.plg` published as a GitHub Release with the `.txz` attached and the real
+- `.plg` published as a Gitea release with the `.txz` attached and the real
   `<MD5>` written onto the FILE block (committed in the version-bump PR, see "Forge and releases").
 - `CHANGELOG.md` updated (Keep a Changelog format).
 - `README.md` (repo) and `plugin/README.md` (stock one-liner) both current.
@@ -258,7 +264,8 @@ tests/run.php                   hand-rolled PHP assert runner
 tests/fixtures/smbstatus.json   synthetic smbstatus -j JSON (RFC 5737 IPs, fake titles)
 scripts/check-md5.sh            build + require the .plg &md5; to match (CI and release)
 .gitea/workflows/ci.yml         lint + test + release-readiness on push/PR (Gitea runner)
-.github/workflows/release.yml   on a mirrored v* tag: version guard, rebuild, md5 check, GitHub Release (dry run via dispatch)
+.gitea/workflows/release.yml    on a v* tag: checks, gates, rebuild, md5, Gitea release (dry run via dispatch); scripts/gitea-release.sh
+.github/workflows/release.yml   legacy mirror workflow, still publishes a GitHub release nothing depends on
 ```
 
 ## The `activity` table (Phase 2)
@@ -467,14 +474,12 @@ Anything else, the `rc.dormouse` and `dormoused` tests above all, stays in CI.
 ## Deploy and verify
 
 1. `scripts/install-on-host.sh [version] [--forced]` — installs or upgrades on
-   the live host, waiting for the CDN copy of `dormouse.plg` to converge on the
-   released version and md5 first (raw.githubusercontent.com caches for up to
-   5 minutes).
+   the live host, waiting for the raw `dormouse.plg` on git.kiztigs.com to show the
+   released version and md5 first.
 2. `scripts/uninstall-on-host.sh` — removes and asserts a clean revert: no
    flash `.plg`, no flash plugin dir, no installed tree, no plugin-manager
    registration, no daemon process, no pid file, no package entry.
-3. After tagging, watch the GitHub release workflow with `gh run list -R kmbrimble/unraid-dormouse` / `gh run watch <id>
-   -R kmbrimble/unraid-dormouse --exit-status` (a read on GitHub, allowed). CI for PRs is on Gitea: `gt run list -R kmbrimble/unraid-dormouse`.
+3. After tagging, watch the release run with `gt run list -R kmbrimble/unraid-dormouse` / `gt run logs <id>`.
 
 ## Phase roadmap
 

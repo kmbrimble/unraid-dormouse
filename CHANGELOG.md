@@ -10,6 +10,13 @@ zero-padded, because Unraid's plugin manager compares versions with a plain
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-11-14
+
+### Changed
+- Delivery moved from GitHub to Gitea: `pluginURL`, the `.txz` URL and `support` point at git.kiztigs.com, and a v* tag now
+  publishes a Gitea release through `.gitea/workflows/release.yml` and `scripts/gitea-release.sh`. The GitHub mirror and its
+  release workflow remain but nothing installed depends on them.
+
 ## [0.2.3] - 2026-09-16
 
 ### Fixed
